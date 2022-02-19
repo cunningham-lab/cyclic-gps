@@ -24,7 +24,8 @@ def UU_T(diags, offdiags):
         leaf1 = torch.einsum('ijk,ilk->ijl',diags,diags)
         leaf2 = torch.einsum('ijk,ilk->ijl',offdiags,offdiags)
         #adding the "squares" on the diagional offset by one
-        tq = torch.cat([leaf1[:-1]+leaf2,[leaf1[-1]]],dim=0)
+        temp = leaf1[:-1]+leaf2
+        tq = torch.cat([leaf1[:-1]+leaf2,leaf1[-1].unsqueeze(0)],dim=0) #double check this unsqueeze
         #matrix multiplication between offdiags and diag transpose
         offdiags = torch.einsum('ijk,ilk->ilj',offdiags,diags[1:])
         return tq,offdiags
@@ -41,15 +42,15 @@ def Ux(diags, offdiags, x):
 
     #non-square matrix
     if n == m:
-        return torch.einsum('ijk,ik->ij',diags,x[:-1]) + torch.einsum('ijk,ik->ij',offdiags,x[1:])
+        return torch.einsum('ijk,ik...->ij',diags,x[:-1]) + torch.einsum('ijk,ik...->ij',offdiags,x[1:])
     else:
-        leaf1 = torch.einsum('ijk,ik->ij',diags,x)
-        leaf2 = torch.einsum('ijk,ik->ij',offdiags,x[1:])
+        leaf1 = torch.einsum('ijk,ik...->ij',diags,x)
+        leaf2 = torch.einsum('ijk,ik...->ij',offdiags,x[1:])
         leaf_sum = leaf1[:-1] + leaf2
         #remembering the final row of the matrix which just has a diagional element and not an upper diagional element
-        return torch.cat([leaf_sum, leaf1[-1]], dim=0)
+        return torch.cat([leaf_sum, leaf1[-1].unsqueeze(0)], dim=0)
 
-def Utx(diags,offdiags,x):
+def U_Tx(diags,offdiags,x):
     '''
     Let U be an upper block-bidiagonal matrix whose
     - diagonals are given by diags
@@ -62,13 +63,13 @@ def Utx(diags,offdiags,x):
     
     #non-square matrix
     if n==m:
-        leaf1= torch.einsum('ikj,ik->ij',diags,x)
-        leaf2= torch.einsum('ikj,ik->ij',offdiags,x)
-        return torch.cat([[leaf1[0]],leaf1[1:]+leaf2[:-1],[leaf2[-1]]], dim=0)
+        leaf1= torch.einsum('ikj,ik...->ij',diags,x)
+        leaf2= torch.einsum('ikj,ik...->ij',offdiags,x)
+        return torch.cat([leaf1[0].unsqueeze(0),leaf1[1:]+leaf2[:-1],leaf2[-1].unsqueeze(0)], dim=0)
     else:
-        leaf1= torch.einsum('ikj,ik->ij',diags,x)
-        leaf2= torch.einsum('ikj,ik->ij',offdiags,x[:-1])
-        return torch.cat([[leaf1[0]],leaf1[1:]+leaf2], dim=0)
+        leaf1= torch.einsum('ikj,ik...->ij',diags,x) #double check ellipsis
+        leaf2= torch.einsum('ikj,ik...->ij',offdiags,x[:-1])
+        return torch.cat([leaf1[0].unsqueeze(0),leaf1[1:]+leaf2], dim=0) #unsqueezing again
 
 def interleave(a, b):
     '''
@@ -101,11 +102,10 @@ def decompose(Rs: TensorType["num_blocks", "block_dim", "block_dim"], Os: Tensor
     Fs = []
     Gs = []
     ms = []
-
     while num_blocks > 1:
         ms += [num_blocks]
         Rs_even = Rs[::2]
-        Ks_even = torch.cholesky(Rs_even)
+        Ks_even = torch.linalg.cholesky(Rs_even)
 
         Os_even = Os[::2]
         Os_odd = Os[1::2]
@@ -114,10 +114,10 @@ def decompose(Rs: TensorType["num_blocks", "block_dim", "block_dim"], Os: Tensor
 
         #Os could be different block size than Ks
         N2 = Os_even.shape[0]
-        #NOTE: HAVING TROUBLE WITH torch.trangular_solve function, DON'T TRY TO RUN THE CODE YET, DEBUGGING STILL IN PROGRESS
-        F = torch.transpose(torch.triangular_solve(b=Os_even_T, A=Ks_even[:N2], upper=False), 1, 2)
+
+        F = torch.transpose(torch.triangular_solve(input=Os_even_T, A=Ks_even[:N2], upper=False)[0], 1, 2)
         #Why is is Os_odd not transposed?
-        G = torch.transpose(torch.triangular_solve(b=Os_odd, A=Ks_even[1::][:N2], upper=False), 1, 2)
+        G = torch.transpose(torch.triangular_solve(input=Os_odd, A=Ks_even[1::][:N2], upper=False)[0], 1, 2)
 
         UU_T_diags, UU_T_offdiags = UU_T(F, G)
 
@@ -131,12 +131,12 @@ def decompose(Rs: TensorType["num_blocks", "block_dim", "block_dim"], Os: Tensor
         Fs += [F]
         Gs += [G]
 
-    Ds += [torch.cholesky(Rs)]
+    Ds += [torch.linalg.cholesky(Rs)]
     ms += [1]
 
-    return ms, Ds, Fs, Gs
+    return torch.tensor(ms), Ds, Fs, Gs
 
-def halfsolve(decomp, y):
+def halfsolve(decomp, y: TensorType["num_blocks", "block_dim"]):
     ms, Ds, Fs, Gs = decomp
 
     #ytilde is our effective y for each L~ as we recurr
@@ -146,7 +146,7 @@ def halfsolve(decomp, y):
         #effect of permutation matrix P_m (takes even b)
         y = ytilde[::2]
         #taking the ith matrix of Ds from cyclic reduction
-        xs.append(torch.triangular_solve(b = y.unsqueeze(-1), A = Ds[i], upper=False)[...,0])
+        xs.append(torch.triangular_solve(input = y.unsqueeze(-1), A = Ds[i], upper=False)[0][...,0])
 
         if ytilde.shape[0] > 1:
             #From the equation (L~)x_2 = (Q_m)b - U(x_1)
@@ -156,7 +156,7 @@ def halfsolve(decomp, y):
 
     return xs
 
-def backhalfsolve(decomp, ycurr):
+def backhalfsolve(decomp, ycrr):
     '''
     Input:
     - decomp, the cyclic reduction representation of a block tridiagonal matrix
@@ -167,29 +167,29 @@ def backhalfsolve(decomp, ycurr):
     ms, Ds, Fs, Gs = decomp
 
     #bottom up recursion: start with the base case, corresponds to the final elements of D and b
-    ytilde = ycurr[-1]
+    ytilde = ycrr[-1]
     #solving L~^T(Q_m)x = b_2
     #base case is L~ = D[-1], and this corresponds to the final D block, and it's lower triangular b/c its just a cholesky decomp
-    xs=torch.triangular_solve(b = ytilde, A = Ds[-1], transpose=True, upper=False) #double check tf.linalg.triangular_solve documentation for adjoint
+    xs=torch.triangular_solve(input = ytilde.unsqueeze(-1), A = Ds[-1], transpose=True, upper=False)[0][...,0]#double check tf.linalg.triangular_solve documentation for adjoint
 
     #up the tower of blocks
     for i in range(1, ms.shape[0] + 1):
         #makes sure we haven't reached the top of the D-blocks
         if len(ycrr)-i-1>=0:
             #next two lines correspond to equation D^T(P_m)x = b_1 - U^T(Q_m)x 
-            ytilde = ycurr[-i-1] - U_Tx(Fs[-i], Gs[-i], xs)
-            x_even = torch.triangular_solve(b = ytilde.unsqueeze(-1), A = Ds[-i-1], transpose=True, upper=False)[...,0]
+            ytilde = ycrr[-i-1] - U_Tx(Fs[-i], Gs[-i], xs)
+            x_even = torch.triangular_solve(input = ytilde.unsqueeze(-1), A = Ds[-i-1], transpose=True, upper=False)[0][...,0]
 
             #Note that xs corresponds to (Q_m)x, which is x_odd for all solutions of x below this point in the recurrsion, 
             #so in order to get the right x_vector for this point in the recurrsion we need to interleave the even and odd solutions
-            xs = interleave(x_even,xs)
+            xs = interleave(x_even,xs) #unsqueeze(0)
         else:
             break
 
     return xs
 
 
-def solve(decomp, y):
+def solve(decomp, y: TensorType["num_blocks", "block_dim"]):
     v = halfsolve(decomp,y)
     w = backhalfsolve(decomp,v)
     return w
@@ -226,7 +226,9 @@ def test():
     import numpy.random as npr
 
     for nblock in [1,3]:
+        print(nblock)
         for nchain in [2,6,30,31,32,33]:
+            print(nchain)
             sh1=(nchain,nblock,nchain,nblock)
             sh2=(nchain*nblock,nchain*nblock)
             Ld=[npr.randn(nblock,nblock) for i in range(nchain)]
@@ -251,19 +253,31 @@ def test():
 
             # check mahalanobis and halfsolve
             v=npr.randn(nchain,nblock)
+        
             mahal=np.mean(v.ravel()*np.linalg.solve(J.reshape(sh2),v.ravel()))
             mahal2=np.mean(np.concatenate(halfsolve(decomp,torch.from_numpy(v)))**2)
             assert np.allclose(mahal,mahal2)
             assert np.allclose(np.linalg.solve(L,Tm@v.ravel()),np.concatenate(halfsolve(decomp,torch.from_numpy(v))).ravel())
 
             # check backhalfsolve
-            vrep=[npr.randn(x,nblock) for x in (np.array(ms)+1)//2]
+            
+            vrep=[torch.tensor(npr.randn(x,nblock)) for x in (np.array(ms)+1)//2]
             v=np.concatenate(vrep)
             rez=np.linalg.solve(L.T@Tm,v.ravel())
-            assert np.allclose(backhalfsolve(decomp,torch.from_numpy(vrep)).numpy().ravel(),rez)
+            assert np.allclose(backhalfsolve(decomp,vrep).numpy().ravel(),rez)
+
+def more_tests():
+    print("---------------")
+    Rs = torch.tensor([2.0, 2.0, 2.0]).unsqueeze(-1).unsqueeze(-1)
+    Os = torch.tensor([-1.0, -1.0]).unsqueeze(-1).unsqueeze(-1)
+    b = torch.tensor([1.0, 1.0, 1.0]).unsqueeze(-1)
+    decomp = decompose(Rs, Os)
+    print(solve(decomp, b))
+
 
 if __name__ == '__main__':
     test()
+    more_tests()
 
 
 
