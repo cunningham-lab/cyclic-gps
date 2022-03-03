@@ -289,41 +289,52 @@ def backhalfsolve(decomp, ycrr):
 
     return xs
 
-# def mahal_and_det(Rs,Os,x):
-#     '''
-#     Let J denote a symmetric positive-definite block-tridiagonal matrix whose
-#     - diagonal blocks are given by Rs
-#     - lower off-diagonal blocks are given by Os
-#     returns
-#     - mahal: x J^-1 x
-#     - det: |J|
-#     We here obtain a cyclic reduction representation of J which can be used
-#     for further analysis.
-#     '''
-#     ms=[]
-#     Ds=[]
-#     Fs=[]
-#     Gs=[]
+def mahal_and_det(Rs,Os,x):
+    '''
+    Let J denote a symmetric positive-definite block-tridiagonal matrix whose
+    - diagonal blocks are given by Rs
+    - lower off-diagonal blocks are given by Os
+    returns
+    - mahal: x J^-1 x
+    - det: |J|
+    We here obtain a cyclic reduction representation of J which can be used
+    for further analysis.
+    '''
+    ms=[]
+    Ds=[]
+    Fs=[]
+    Gs=[]
 
-#     det=0
-#     mahal=0
+    det=0
+    mahal=0
 
-#     ytilde=x
+    ytilde=x
 
-#     while Rs.shape[0]>1:
-#         # do the work
-#         (numblocks,Ks_even,F,G),(Rs,Os) = _decompose_workhorse(Rs,Os)
+    while Rs.shape[0]>1:
+        # do the work
+        (numblocks,Ks_even,F,G),(Rs,Os) = decompose_loop(Rs,Os)
 
-#         # det
-#         det+=tf.reduce_sum(tf.math.log(tf.linalg.diag_part(D1)))
+        # det
+        #print(Ks_even.shape)
+        #t = torch.diag(Ks_even)
+        det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
 
-#         # process the even entries
-#         y=ytilde[::2]
-#         newx = tf.linalg.triangular_solve(D1,y[...,None])[...,0]
-#         mahal+= tf.reduce_sum(newx**2)
+        # process the even entries
+        y=ytilde[::2]
+        newx = torch.triangular_solve(input=Ks_even, A=y.unsqueeze(-1), upper=False)[0][...,0]
+        mahal+= torch.sum(newx**2)
 
-#         # recurse on the odd entries
-#         ytilde = ytilde[1::2] - Ux(F,G,newx)
+        # recurse on the odd entries
+        ytilde = ytilde[1::2] - Ux(F,G,newx)
+
+    D1=torch.linalg.cholesky(Rs)
+    det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
+    y=ytilde[::2]
+    newx = torch.triangular_solve(input=Ks_even, A=y.unsqueeze(-1), upper=False)[0][...,0]
+    mahal+= torch.sum(newx**2)
+
+    return mahal, 2*det
+
 
 
 def solve(decomp, y: TensorType["num_blocks", "block_dim"]):
@@ -543,11 +554,11 @@ def test():
 
             #check mahalanobis and halfsolve
             v=npr.randn(nchain,nblock)
-        
-            mahal=np.sum(v.ravel()*np.linalg.solve(J.reshape(sh2),v.ravel()))
+
+            mahal1=np.sum(v.ravel()*np.linalg.solve(J.reshape(sh2),v.ravel()))
             mahal2 = mahal(decomp, torch.from_numpy(v))
             #mahal2=np.mean(np.concatenate(halfsolve(decomp,torch.from_numpy(v)))**2)
-            assert np.allclose(mahal,mahal2)
+            assert np.allclose(mahal1,mahal2)
             
             assert np.allclose(np.linalg.solve(L,Tm@v.ravel()),np.concatenate(halfsolve(decomp,torch.from_numpy(v))).ravel())
 
@@ -557,6 +568,14 @@ def test():
             det1 = det(decomp)
             det2 = np.linalg.slogdet(J.reshape(sh2))[1]
             assert np.allclose(det1,det2)
+
+            #check mahal and det
+            mahal3, det3 = mahal_and_det(torch.from_numpy(Rs),torch.from_numpy(Os),torch.from_numpy(v))
+            print(mahal1, mahal2, mahal3)
+            #assert np.allclose(mahal1,mahal3)
+            print(det1, det2, det3)
+            assert np.allclose(det1,det3)
+
 
             # check backhalfsolve
             vrep=[torch.tensor(npr.randn(x,nblock)) for x in (np.array(ms)+1)//2]
@@ -573,6 +592,9 @@ def test():
             b = guess_diag.numpy().ravel()
             assert np.allclose(guess_diag.numpy().ravel(),Sig_diag.ravel())
             assert np.allclose(guess_off.numpy().ravel(),Sig_off.ravel())
+
+            
+
 
 def more_tests():
     print("---------------")
