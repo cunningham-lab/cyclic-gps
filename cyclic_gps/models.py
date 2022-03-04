@@ -9,7 +9,7 @@ patch_typeguard()
 
 
 @typechecked
-class LEGFamily:
+class LEGFamily(torch.nn.Module):
     # TODO: inherit from torch.nn.module? or lightning module?
 
     """
@@ -19,6 +19,7 @@ class LEGFamily:
 
     def __init__(self, ell: int, n: int, train: bool = False) -> None:
         # TODO: change ell -> rank, and n -> obs dim ?
+        super().__init__()
         self.ell = ell
         self.n = n
 
@@ -55,10 +56,17 @@ class LEGFamily:
     def inds_to_tuple(
         raw_inds: TensorType[2, "num_entries"]
     ) -> Tuple[TensorType["num_entries"], TensorType["num_entries"]]:
+        # convert a tensor to a tuple of tensors, to support natural indexing.
         return (raw_inds[0], raw_inds[1])
 
     def get_initial_guess(self):
-        pass
+        """initialize all the parameters."""
+        # latent PEG process params
+        self.set_initial_N()
+        self.set_initial_R()
+        # observation model params
+        self.set_initial_B()
+        self.set_initial_Lambda()
 
     def set_initial_N(self) -> None:
         """modify the initial data of self.N_params"""
@@ -88,121 +96,96 @@ class LEGFamily:
     @property
     def parameter_count(self) -> int:
         """number of total params"""
-        return (
-            self.N_idxs.shape[1]  # N params from PEG over z
-            + self.R_idxs.shape[1]  # R params from PEG over z
-            + self.ell * self.n  # B params, project z->x
-            + self.Lambda_idxs.shape[1]  # Lambda params, x's covariance
+
+        count = (
+            len(self.N_params)  # N params from PEG over z
+            + len(self.R_params)  # R params from PEG over z
+            + len(self.Lambda_params)  # B params, project z->x
+            + torch.numel(self.B)  # Lambda params, x's covariance
         )
+        return count
 
-    # def p2NRBL(self, p):
-    #     i = 0
+    def N_from_params(self) -> None:
+        N = torch.zeros(self.ell, self.ell, dtype=self.N_params.dtype)
+        N[self.N_idxs] = self.N_params
+        self.register_buffer("N", N)
 
-    #     # N!
-    #     sz = self.N_idxs.shape[0]
-    #     N = tf.scatter_nd(self.N_idxs, p[i : i + sz], (self.ell, self.ell))
-    #     i += sz
+    def R_from_params(self) -> None:
+        R = torch.zeros(self.ell, self.ell, dtype=self.R_params.dtype)
+        R[self.R_idxs] = self.R_params
+        self.register_buffer("R", R)
 
-    #     # R!
-    #     sz = self.R_idxs.shape[0]
-    #     R = tf.scatter_nd(self.R_idxs, p[i : i + sz], (self.ell, self.ell))
-    #     i += sz
+    def Lambda_from_params(self) -> None:
+        Lambda = torch.zeros(self.n, self.n, dtype=self.Lambda_params.dtype)
+        Lambda[self.Lambda_idxs] = self.Lambda_params
+        self.register_buffer("Lambda", Lambda)
 
-    #     # B!
-    #     sz = self.ell * self.n
-    #     B = tf.reshape(p[i : i + sz], (self.n, self.ell))
-    #     i += sz
+    def calc_G(self) -> None:
+        """describe G here. it's an important quantity of LEG, needed for cov/precision"""
+        G: TensorType[
+            "latent_dim", "latent_dim"
+        ] = self.N @ self.N.T + self.R - self.R.T
+        # add small diag noise
+        G += torch.eye(self.N.shape[0], dtype=self.N.dtype) * (1e-5)
+        self.register_buffer("G", G)
 
-    #     # Lambda!
-    #     sz = self.Lambda_idxs.shape[0]
-    #     Lambda = tf.scatter_nd(self.Lambda_idxs, p[i : i + sz], (self.n, self.n))
-    #     i += sz
+    @staticmethod
+    def calc_Lambda_Lambda_T(Lambda: TensorType["n", "n"]) -> TensorType["n", "n"]:
+        if len(Lambda.shape) == 2:
+            Lambda_Lambda_T = Lambda @ Lambda.T
+            Lambda_Lambda_T += 1e-9 * torch.eye(
+                Lambda_Lambda_T.shape[0], dtype=Lambda_Lambda_T.dtype
+            )
+        else:  # TODO: check what this condition covers
+            Lambda_Lambda_T = torch.diag(Lambda ** 2 + 1e-9)
+        return Lambda_Lambda_T
 
-    #     return N, R, B, Lambda
+    def log_likelihood(self):
+        raise NotImplementedError
 
-    # @tf.function(autograph=False)
-    # def informant(self, ts, x, idxs, p):
-    #     """
-    #     gradient of log likelihood w.r.t. p
-    #     """
-    #     with tf.GradientTape() as g:
-    #         g.watch(p)
-    #         N, R, B, Lambda = self.p2NRBL(p)
-    #         nats = legops.leg_log_likelihood_tensorflow(ts, x, idxs, N, R, B, Lambda)
-    #     return g.gradient(nats, p)
-
-    # @tf.function(autograph=False)
-    # def log_likelihood(self, ts, x, idxs, p):
-    #     """
-    #     log likelihood
-    #     """
-    #     N, R, B, Lambda = self.p2NRBL(p)
-    #     return legops.leg_log_likelihood_tensorflow(ts, x, idxs, N, R, B, Lambda)
-
-    # def get_initial_guess(self, ts, xs, N=None, R=None, B=None, Lambda=None):
-    #     # make up values when nothing is provided
-    #     if N is None:
-    #         N = np.eye(self.ell)
-    #     if R is None:
-    #         R = npr.randn(self.ell, self.ell) * 0.2
-    #         R = 0.5 * (R - R.T)
-    #     if B is None:
-    #         B = np.ones((self.n, self.ell))
-    #         B = 0.5 * B / np.sqrt(np.sum(B ** 2, axis=1, keepdims=True))
-    #     if Lambda is None:
-    #         Lambda = 0.1 * np.eye(self.n)
-
-    #     # make 'em nice for us
-    #     N = tf.linalg.cholesky(N @ tf.transpose(N))
-    #     R = R - tf.transpose(R)
-    #     Lambda = tf.linalg.cholesky(Lambda @ tf.transpose(Lambda))
-
-    #     # put it all together
-    #     pN = tf.gather_nd(N, self.N_idxs)
-    #     pR = tf.gather_nd(R, self.R_idxs)
-    #     pB = tf.reshape(B, (self.n * self.ell,))
-    #     pL = tf.gather_nd(Lambda, self.Lambda_idxs)
-    #     return tf.concat([pN, pR, pB, pL], axis=0)
+    def gradient_log_likelihood(self):
+        raise NotImplementedError
 
 
-class CeleriteFamily(LEGFamily):
-    def __init__(self, nblocks, n):
-        self.nblocks = nblocks
-        self.ell = nblocks * 2
-        self.n = n
+# TODO: add implementation for CeleriteFamily
+# class CeleriteFamily(LEGFamily):
+#     def __init__(self, nblocks: int, n: int) -> None:
+#         self.nblocks = nblocks
+#         self.ell = nblocks * 2
+#         self.n = n
 
-        msk = np.eye(self.ell, dtype=np.bool) + np.diag(
-            np.tile([True, False], self.nblocks)[:-1], -1
-        )
-        self.N_idxs = tf.convert_to_tensor(np.c_[np.where(msk)])
+#         msk = np.eye(self.ell, dtype=np.bool) + np.diag(
+#             np.tile([True, False], self.nblocks)[:-1], -1
+#         )
+#         self.N_idxs = tf.convert_to_tensor(np.c_[np.where(msk)])
 
-        msk = np.diag(np.tile([True, False], self.nblocks)[:-1], -1)
-        self.R_idxs = tf.convert_to_tensor(np.c_[np.where(msk)])
+#         msk = np.diag(np.tile([True, False], self.nblocks)[:-1], -1)
+#         self.R_idxs = tf.convert_to_tensor(np.c_[np.where(msk)])
 
-        msk = np.tril(np.ones((self.n, self.n)))
-        self.Lambda_idxs = tf.convert_to_tensor(np.c_[np.where(msk)])
+#         msk = np.tril(np.ones((self.n, self.n)))
+#         self.Lambda_idxs = tf.convert_to_tensor(np.c_[np.where(msk)])
 
-        self.psize = (
-            self.N_idxs.shape[0]
-            + self.R_idxs.shape[0]
-            + self.ell * self.n
-            + self.Lambda_idxs.shape[0]
-        )
+#         self.psize = (
+#             self.N_idxs.shape[0]
+#             + self.R_idxs.shape[0]
+#             + self.ell * self.n
+#             + self.Lambda_idxs.shape[0]
+#         )
 
-    def get_initial_guess(self, ts, xs):
-        N = np.eye(self.ell)
-        R = npr.randn(self.ell, self.ell) * 0.2
-        B = np.ones((self.n, self.ell))
-        B = 0.5 * B / np.sqrt(np.sum(B ** 2, axis=1, keepdims=True))
-        Lambda = 0.1 * np.eye(self.n)
-        N = tf.linalg.cholesky(N @ tf.transpose(N))
-        R = R - tf.transpose(R)
-        Lambda = tf.linalg.cholesky(Lambda @ tf.transpose(Lambda))
+#     def get_initial_guess(self, ts, xs):
+#         N = np.eye(self.ell)
+#         R = npr.randn(self.ell, self.ell) * 0.2
+#         B = np.ones((self.n, self.ell))
+#         B = 0.5 * B / np.sqrt(np.sum(B ** 2, axis=1, keepdims=True))
+#         Lambda = 0.1 * np.eye(self.n)
+#         N = tf.linalg.cholesky(N @ tf.transpose(N))
+#         R = R - tf.transpose(R)
+#         Lambda = tf.linalg.cholesky(Lambda @ tf.transpose(Lambda))
 
-        # put it all together
-        pN = tf.gather_nd(N, self.N_idxs)
-        pR = tf.gather_nd(R, self.R_idxs)
-        pB = tf.reshape(B, (self.n * self.ell,))
-        pL = tf.gather_nd(Lambda, self.Lambda_idxs)
-        return tf.concat([pN, pR, pB, pL], axis=0)
+#         # put it all together
+#         pN = tf.gather_nd(N, self.N_idxs)
+#         pR = tf.gather_nd(R, self.R_idxs)
+#         pB = tf.reshape(B, (self.n * self.ell,))
+#         pL = tf.gather_nd(Lambda, self.Lambda_idxs)
+#         return tf.concat([pN, pR, pB, pL], axis=0)
 
