@@ -214,7 +214,7 @@ def decompose_loop(
 
     Os_even_T = Os_even.transpose(1, 2)
 
-    # Os could be different block size than Ks
+    # Could have fewer off diagional blocks than diagional blocks if overall matrix is square
     N2 = Os_even.shape[0]
 
     F = torch.transpose(
@@ -319,7 +319,7 @@ def backhalfsolve(decomp, ycrr):
             )[0][..., 0]
 
             # Note that xs corresponds to (Q_m)x, which is x_odd for all solutions of x below this point in the recurrsion,
-            # so in order to get the right x_vector for this point in the recurrsion we need to interleave the even and odd solutions
+            # so in order to get the right x vector for this point in the recurrsion we need to interleave the even and odd solutions
             xs = interleave(x_even, xs)  # unsqueeze(0)
         else:
             break
@@ -353,7 +353,7 @@ def mahal_and_det(
     ytilde = x
 
     while Rs.shape[0] > 1:
-        # do the work
+        # get the decomposition of D and U for this state of the cyclic reduction recursion 
         (numblocks, Ks_even, F, G), (Rs, Os) = decompose_loop(Rs, Os)
 
         # det
