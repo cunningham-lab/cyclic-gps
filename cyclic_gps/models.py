@@ -140,6 +140,57 @@ class LEGFamily(torch.nn.Module):
             Lambda_Lambda_T = torch.diag(Lambda ** 2 + 1e-9)
         return Lambda_Lambda_T
 
+    def distribution(self, inputs, outputs, indices, Sig):
+        # note: Sig = LambdaLambdaT, have to call the above function for that.
+        # TODO: type assertions
+        # get Jd
+        J_dblocks, J_offblocks = self.exponentiate_generator(inputs=inputs)
+
+        # get JT (TODO: verify)
+        # Sig v = x -> v = Sig^{-1} x, call it "Sig_inv_x"
+        Sig_inv_x = torch.transpose(torch.linalg.solve(Sig, inputs.T))  # <-- m x n
+        Sig_inv_b = torch.linalg.solve(Sig, self.B)  # <-- n x ell
+        # TODO: check how this adds offset?
+        offset_adder = torch.einsum("nl,mn->ml", self.B, Sig_inv_x)  # <-- m x ell
+        # TODO: continute here.
+
+    def exponentiate_generator(self, inputs):
+        """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process """
+        # TODO: educate ourselves on the computations here
+        diffs = inputs[1:] - inputs[:-1]  # be careful when extending to input_dim>1
+        # exponentiate the diffs, TODO: move to Jackson's efficient method?
+        # comes from Definition 1 (diffs are tau in the paper)
+        expd = torch.matrix_exp(-0.5 * self.G.unsqueeze(0) * diffs.reshape(-1, 1, 1))
+        expdT = torch.transpose(expd, 1, 2)  # exp(X^T) = (exp X)^T
+        eye = torch.eye(self.G.shape[0], dtype=expd.dtype)
+
+        # TODO: replace names after better understanding
+        # Ax = b --> x = A^{-1}b, therefore
+        # (I - G^T G) x = G^T --> x = (I - G^T G)^{-1} G^T
+        imgtgigt = torch.linalg.solve(A=eye.unsqueeze(0) - expdT @ expd, b=expdT)
+        imggtig = torch.linalg.solve(A=eye.unsqueeze(0) - expd @ expdT, b=expd)
+
+        offdiag_blocks = -imggtig
+        # Dcontrib1[-1] connects ts[-2] to ts[-1], and isn't applic to 0
+        Dcontrib1 = expd @ imgtgigt
+        # Dcontrib2[0] connects ts[0] to ts[1], and isn't applicable to -1
+        Dcontrib2 = expdT @ imggtig
+
+        # I + everything but Dcontrib1[-1] + everything but Dcontrib2[0]
+        diag_blocks_inner = eye.unsqueeze(0) + Dcontrib1[:-1] + Dcontrib2[1:]
+        diag_blocks = torch.cat(
+            [
+                (eye + Dcontrib2[0]).unsqueeze(0),
+                diag_blocks_inner,
+                (eye + Dcontrib1[-1]).unsqueeze(0),
+            ],
+            dim=0,
+        )
+
+        return diag_blocks, offdiag_blocks
+
+        # Get J (perfectly described by its diagonal and off-diagonal blocks)
+
     def log_likelihood(self):
         raise NotImplementedError
 
