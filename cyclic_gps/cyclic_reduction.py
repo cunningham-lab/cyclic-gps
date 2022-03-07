@@ -26,9 +26,7 @@ def UU_T(diags, offdiags):
         leaf2 = torch.einsum("ijk,ilk->ijl", offdiags, offdiags)
         # adding the "squares" on the diagional offset by one
         temp = leaf1[:-1] + leaf2
-        tq = torch.cat(
-            [leaf1[:-1] + leaf2, leaf1[-1].unsqueeze(0)], dim=0
-        )
+        tq = torch.cat([leaf1[:-1] + leaf2, leaf1[-1].unsqueeze(0)], dim=0)
         # matrix multiplication between offdiags and diag transpose
         offdiags = torch.einsum("ijk,ilk->ilj", offdiags, diags[1:])
         return tq, offdiags
@@ -109,7 +107,7 @@ def SigU(sig_dblocks, sig_offdblocks, u_dblocks, u_offdblocks):
         upper_diagional = torch.matmul(sig_dblocks[:-1], u_offdblocks) + torch.matmul(
             torch.transpose(sig_offdblocks, 1, 2), u_dblocks[1:]
         )  # make sure transposing right dimensions
-    
+
     # non-square matrix
     else:
         main_diagional = torch.cat(
@@ -270,9 +268,10 @@ def halfsolve(decomp, y: TensorType["num_blocks", "block_dim"]):
     ytilde = y
     xs = []
     for i in range(ms.shape[0]):
-        # effect of permutation matrix P_m (takes even b)
+        # effectively doing: y = P_m \tilde{y}, i.e., extract odd indices.
         y = ytilde[::2]
-        # taking the ith matrix of Ds from cyclic reduction
+        # taking the ith diagonal block of D, which is a lower triangular matrix (from Cholesky),
+        # solving D x_1 = y. TODO: this is done in a loop, but the diag blocks are independent. can we parallelize?
         xs.append(
             torch.triangular_solve(input=y.unsqueeze(-1), A=Ds[i], upper=False)[0][
                 ..., 0
@@ -280,8 +279,11 @@ def halfsolve(decomp, y: TensorType["num_blocks", "block_dim"]):
         )
 
         if ytilde.shape[0] > 1:
-            # From the equation (L~)x_2 = (Q_m)b - U(x_1)
+            # plug in x_1 you obtained above to the re-arranged equation for x_2.
+            # i.e., \tilde{L} x_2 = Q_m b - U x_1
+            # ytilde[1::2] = Q_m y, selects the even entries.
             ytilde = ytilde[1::2] - Ux(Fs[i], Gs[i], xs[-1])
+            # we again need to solve L^{\top}x= \tilde{y}, so \tilde{y} will go into the for loop above.
         else:
             break
 
@@ -330,7 +332,7 @@ def backhalfsolve(decomp, ycrr):
 def mahal_and_det(
     Rs: TensorType["num_dblocks", "block_dim", "block_dim"],
     Os: TensorType["num_offdblocks", "block_dim", "block_dim"],
-    x: TensorType["num_dblocks", "block_dim"]
+    x: TensorType["num_dblocks", "block_dim"],
 ):
     """
     Let J denote a symmetric positive-definite block-tridiagonal matrix whose
@@ -353,25 +355,25 @@ def mahal_and_det(
     ytilde = x
 
     while Rs.shape[0] > 1:
-        # get the decomposition of D and U for this state of the cyclic reduction recursion 
+        # get the decomposition of D and U for this state of the cyclic reduction recursion
         (numblocks, Ks_even, F, G), (Rs, Os) = decompose_loop(Rs, Os)
 
         # det
         det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
 
-        #computes D^{-1}(P_m y)
+        # computes D^{-1}(P_m y)
         y = ytilde[::2]
         newx = torch.triangular_solve(input=y.unsqueeze(-1), A=Ks_even, upper=False)[0][
             ..., 0
         ]
         mahal += torch.sum(newx ** 2)
 
-        #computes Q_m y - UD^{-1}(P_m y)
+        # computes Q_m y - UD^{-1}(P_m y)
         ytilde = ytilde[1::2] - Ux(F, G, newx)
 
     Ks_even = torch.linalg.cholesky(Rs)
     det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
-    
+
     y = ytilde[::2]
     newx = torch.triangular_solve(input=y.unsqueeze(-1), A=Ks_even, upper=False)[0][
         ..., 0
@@ -437,9 +439,4 @@ def inverse_blocks(decomp):
         )
 
     return Sig_diag, Sig_off
-
-
-
-
-
 
