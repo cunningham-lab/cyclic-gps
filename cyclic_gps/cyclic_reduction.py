@@ -359,14 +359,14 @@ def mahal_and_det(
         # det
         det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
 
-        # process the even entries
+        #computes D^{-1}(P_m y)
         y = ytilde[::2]
         newx = torch.triangular_solve(input=y.unsqueeze(-1), A=Ks_even, upper=False)[0][
             ..., 0
         ]
         mahal += torch.sum(newx ** 2)
 
-        # recurse on the odd entries
+        #computes Q_m y - UD^{-1}(P_m y)
         ytilde = ytilde[1::2] - Ux(F, G, newx)
 
     Ks_even = torch.linalg.cholesky(Rs)
