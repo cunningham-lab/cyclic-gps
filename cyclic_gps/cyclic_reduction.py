@@ -160,7 +160,7 @@ def UtV_diags(
 
     # non-square matrix
     else:
-        return torch.concat(
+        return torch.cat(
             [
                 (u_dblocks[0].T @ v_dblocks[0]).unsqueeze(0),
                 torch.matmul(torch.transpose(u_dblocks[1:], 1, 2), v_dblocks[1:])
@@ -277,7 +277,7 @@ def halfsolve(decomp, y: TensorType["num_blocks", "block_dim"]):
                 ..., 0
             ]
         )
-
+        # if we have more than one block in y
         if ytilde.shape[0] > 1:
             # plug in x_1 you obtained above to the re-arranged equation for x_2.
             # i.e., \tilde{L} x_2 = Q_m b - U x_1
