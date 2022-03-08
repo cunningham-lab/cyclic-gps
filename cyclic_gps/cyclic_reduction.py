@@ -228,7 +228,7 @@ def decompose_loop(
 
     # Could have fewer off diagional blocks than diagional blocks if overall matrix is square
     N2 = Os_even.shape[0]
-
+    # we use lower triangular solves since Ks_even (D in the paper) is lower triangular -- Cholesky on R blocks
     F = torch.transpose(
         torch.triangular_solve(input=Os_even_T, A=Ks_even[:N2], upper=False)[0], 1, 2
     )
