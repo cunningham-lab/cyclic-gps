@@ -1,7 +1,8 @@
+from math import ceil, floor
 import torch
 from torchtyping import TensorType, patch_typeguard
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from typeguard import typechecked
 
 patch_typeguard()
@@ -195,10 +196,23 @@ def interleave(a, b):
         return torch.cat([first_part, last_bit], dim=0)
 
 
+@typechecked
 def decompose_loop(
     Rs: TensorType["num_dblocks", "block_dim", "block_dim"],
     Os: TensorType["num_offdblocks", "block_dim", "block_dim"],
-):
+) -> Tuple[
+    Tuple[
+        int,
+        TensorType[-1, "block_dim", "block_dim"],
+        TensorType[-1, "block_dim", "block_dim"],
+        TensorType[-1, "block_dim", "block_dim"],
+    ],
+    Tuple[
+        TensorType[-1, "block_dim", "block_dim"],
+        TensorType[-1, "block_dim", "block_dim"],
+    ],
+]:
+    # We're not strongly asserting the number of blocks, because it depends on whether we we have an even number of diagonal blocks.
     # upper and lower off-diags should have one less block
     num_dblocks = Rs.shape[0]
     num_offdblocks = Os.shape[0]
@@ -229,7 +243,31 @@ def decompose_loop(
     Rs = Rs[1::2] - UU_T_diags
     Os = -UU_T_offdiags
 
+    # Check that output batch dims make sense
+    check_decompose_loop_outputs(num_dblocks, Ks_even, F, G, Rs, Os)
+
     return (num_dblocks, Ks_even, F, G), (Rs, Os)
+
+
+def check_decompose_loop_outputs(num_dblocks, Ks_even, F, G, Rs, Os):
+    # if even number of diagonal blocks:
+    if num_dblocks % 2 == 0:
+        assert (
+            Ks_even.shape[0] == num_dblocks // 2
+            and F.shape[0] == num_dblocks // 2
+            and G.shape[0] == num_dblocks // 2 - 1
+            and Rs.shape[0] == num_dblocks // 2
+            and Os.shape[0] == num_dblocks // 2 - 1
+        )
+    # if odd number of diagonal blocks, and more than one such block:
+    elif num_dblocks % 2 != 0 & num_dblocks > 1:
+        assert (
+            Ks_even.shape[0] == ceil(num_dblocks // 2)
+            and F.shape[0] == floor(num_dblocks // 2)
+            and G.shape[0] == floor(num_dblocks // 2)
+            and Rs.shape[0] == floor(num_dblocks // 2)
+            and Os.shape[0] == floor(num_dblocks // 2) - 1
+        )
 
 
 # J is a symmetric block tridiagional matrix with R blocks on the main diagional, and O blocks below it
