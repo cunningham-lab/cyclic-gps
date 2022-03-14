@@ -224,7 +224,8 @@ class LEGFamily(torch.nn.Module):
         Sigma_inv = self.compute_PEG_precision(ts)
         LLT_inv_B = torch.linalg.solve(A=LLT, B=self.B)
         B_T_LLT_inv_B = self.B.T @ LLT_inv_B  #trying without einsum
-        K = Sigma_inv + B_T_LLT_inv_B
+        
+        #K = Sigma_inv + B_T_LLT_inv_B
 
 
         
