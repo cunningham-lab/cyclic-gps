@@ -392,6 +392,14 @@ def mahal_and_det(
 
     ytilde = x
 
+    
+    #What is the idea of this "mahal" function?
+    #Compute ||L^{-1}x||^2 for a given J
+    #So we show that this is equal to ||D^{-1}(P_m x)||^2 + ||L~^{-1}Q_m y - UD^{-1}(P_m y)||^2
+    #Since for a given decompose_loop we compute D, U, and J~, we can compute this recursively 
+    #by first computing ||D^{-1}(P_m x)||^2 and then calling the function recursively 
+    #with J~ and v = Q_m y - UD^{-1}(P_m y) which will give us ||L~^{-1}v||^2 
+    
     while Rs.shape[0] > 1:
         # get the decomposition of D and U for this state of the cyclic reduction recursion
         (numblocks, Ks_even, F, G), (Rs, Os) = decompose_loop(Rs, Os)
