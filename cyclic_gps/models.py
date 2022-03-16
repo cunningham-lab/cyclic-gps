@@ -219,7 +219,8 @@ class LEGFamily(torch.nn.Module):
         
         #we want the matrix multiplication of M_1.T @ M_2.T = (M_2 @ M_1).T
         v_entries = torch.einsum('nl,mn->ml', self.B, x_LLT_inv) #(m x rank) b/c equal to x LLT_inv B (which is equal to (B^T LLT_inv x^T)^T)
-        v = 
+        v = torch.zeros(ts.shape[0], self.G.shape[0])
+        v = v.scatter_(dim)
 
         Sigma_inv = self.compute_PEG_precision(ts)
         LLT_inv_B = torch.linalg.solve(A=LLT, B=self.B)
