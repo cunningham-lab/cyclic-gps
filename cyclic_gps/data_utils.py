@@ -1,13 +1,21 @@
 import torch
-from typing import List
+from torch.utils.data import Dataset
+from typing import Tuple
+from torchtyping import TensorType, patch_typeguard
+from typeguard import typechecked
 
-def threshold_timesteps(ts_vec: TensorType["num_obs"], thresh=1e-10, check=True):
+patch_typeguard()
+
+#might not be neccessary for our purposes, takes into account multiple observations per time point (Note that this is different than having multidimensional observations)
+@typechecked
+def threshold_timesteps(ts_vec: TensorType["num_obs"], thresh=1e-10, check=True) -> Tuple[TensorType["num_thresholded_obs"], TensorType["num_obs"]]:
 	"""
 	inputs:
 		all_ts: tensor of observation times for a sample
 		thresh: minimum difference between observation times
 		check: whether to make sure subseqent observation times are not constant
 	output:
+		ts
 
 	"""
 
@@ -20,9 +28,28 @@ def threshold_timesteps(ts_vec: TensorType["num_obs"], thresh=1e-10, check=True)
 	good = torch.cat([torch.tensor(True), diff>thresh], axis=0)
 	ts = ts_vec[good]
 
-	#find 
+	#find index 
+	#true, true, false, true, false, false, true
+	#1, 2, 2, 3, 3, 3, 4
+	#0, 1, 1, 2, 2, 2, 3
+
+	#indexes that go from original timestep indices to the new timestep indices
 	idxs = torch.cum_sum(good.int()) - 1
 
 	return ts, idxs #might need to change ts data type
+
+
+class time_series_dataloader(Dataset):
+	@typechecked
+	def __init__(self, ts: TensorType["batch", "num_obs"], xs: TensorType["batch", "num_obs", "obs_dim"]):
+		self.ts = ts
+		self.xs = xs
+
+	def __len__(self):
+		return ts.shape[0]
+
+	def __getitem__(self, idx):
+		return ts[idx], xs[idx]
+
 
 

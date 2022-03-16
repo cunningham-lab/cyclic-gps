@@ -1,10 +1,13 @@
-from matplotlib.pyplot import axis
+#from matplotlib.pyplot import axis
 import torch as torch
-import numpy as np
+from torch.optim import Adam
+import pytorch_lightning as pl
+#import numpy as np
 from typing import List, Dict, Tuple
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
 from cyclic_gps.cyclic_reduction import mahal_and_det, mahal, decompose
+import math
 
 patch_typeguard()
 
@@ -54,10 +57,10 @@ class LEGFamily(torch.nn.Module):
         torch.nn.init.uniform_(self.B)  # initialize (later override)
 
         #########################################################################
+        self.get_initial_guess()
 
-
-        self.peg_precision = compute_PEG_precision()
-        self.
+        # self.peg_precision = compute_PEG_precision()
+        # self.
 
     @staticmethod
     def inds_to_tuple(
@@ -160,11 +163,11 @@ class LEGFamily(torch.nn.Module):
     #     # TODO: check how this adds offset?
     #     offset_adder = torch.einsum("nl,mn->ml", self.B, Sig_inv_x)  # <-- m x rank
     #     # TODO: continute here.
-
-    def compute_PEG_precision(self, ts):
+    @typechecked
+    def compute_PEG_precision(self, ts:TensorType["num_obs"]):
         """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process """
 
-        diffs = inputs[1:] - inputs[:-1]  # be careful when extending to input_dim>1
+        diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
         # exponentiate the diffs, TODO: move to Jackson's efficient method?
         # comes from Definition 1 (diffs are tau in the paper)
 
@@ -202,45 +205,63 @@ class LEGFamily(torch.nn.Module):
 
         # Get J (perfectly described by its diagonal and off-diagonal blocks)
 
-
-
-    def compute_LEG_mahal(self, ts, xs):
-        #note that LLT = lambda(lambda^T)
-        #computes x^T LLT^{-1} x
-        LLT = self.calc_Lambda_Lambda_T(self.Lambda)
-        LLT_decomp = decompose(LLT)
-        mahal = mahal(LLT_decomp, targets)
-
-        #v = B^T LLT^{-1}x
-        #K = Sigma^{-1} + B^T(LLT)^{-1}B 
+    @typechecked
+    def log_likelihood(self, ts:TensorType["num_obs"], xs:TensorType["num_obs", "obs_dim"], idxs=None):
+        #Notation:
+        #v := B^T LLT^{-1} x
+        #Sigma := PEG covariance
+        #K := Sigma^{-1} + B^T(LLT)^{-1}B 
+        #LLT := Lambda(Lambda^T)
+ 
+        LLT = self.calc_Lambda_Lambda_T(self.Lambda) # (obs_dim x obs_dim)
 
         #LL^T is symmetric
-        x_LLT_inv = torch.linalg.solve(A=LLT, B=xs.T).T
-        
-        #we want the matrix multiplication of M_1.T @ M_2.T = (M_2 @ M_1).T
-        v_entries = torch.einsum('nl,mn->ml', self.B, x_LLT_inv) #(m x rank) b/c equal to x LLT_inv B (which is equal to (B^T LLT_inv x^T)^T)
-        v = torch.zeros(ts.shape[0], self.G.shape[0])
-        v = v.scatter_(dim)
+        x_LLT_inv = torch.linalg.solve(A=LLT, B=xs.T).T # (num_obs x obs_dim)
+        LLT_mahal = x_LLT_inv * xs
 
-        Sigma_inv = self.compute_PEG_precision(ts)
+        #could make this more efficient as lambda is triangular?
+        LLT_det = torch.logdet(LLT) * xs.shape[0] # "real" shape of LLT is block diagional with num_obs blocks each of size (obs_dim x obs_dim)
+        
+
+        #we want the matrix multiplication of B.T @ x_LLT_inv.T = (x_LLT_inv @ B).T
+        #so not sure why he doesn't have a transpose here
+        v = x_LLT_inv @ self.B
+        #v_entries = torch.einsum('nl,mn->ml', self.B, x_LLT_inv) #(m x rank) b/c equal to x LLT_inv B (which is equal to (B^T LLT_inv x^T)^T)
+        
+        #v = torch.zeros(ts.shape[0], self.G.shape[0])
+        #v = v.scatter_(dim)
+
+        Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
+        Sigma_inv_decomp = decompose(Sigma_inv_Rs, Sigma_inv_Os)
+        Sigma_inv_det = det(Sigma_inv_decomp)
+
         LLT_inv_B = torch.linalg.solve(A=LLT, B=self.B)
         B_T_LLT_inv_B = self.B.T @ LLT_inv_B  #trying without einsum
         
-        #K = Sigma_inv + B_T_LLT_inv_B
+        #note that the "real" B is block diagional with diagional blocks given by B, and same with the "real" LLT
+        #so the "real" matrix B_T_LLT_inv_B we are concerned with has diagional blocks equal to B_T_LLT_inv_B
+        K_Rs = Sigma_inv_Rs + B_T_LLT_inv_B.unsqueeze(0)
+        K_Os = Sigma_inv_Os
 
+        K_mahal, K_det = mahal_and_det(Rs=K_Rs, Os=K_Os, x=v)
+        mahal = LLT_mahal - K_mahal
 
         
-        
+        det = LLT_det + K_det - Sigma_inv_det #log rules
 
-    def compute_LEG_det(self, ts):
+        return -0.5 * (mahal + det)
 
+    
+    def training_step(self, train_batch, batch_idx):
+        t, x = train_batch
+        nobs = x.shape[0] * x.shape[1]
+        loss = self.log_likelihood(t, x)
+        loss = -loss/nobs
+        return loss
 
-
-
-    def log_likelihood(self, ts, xs):
-        ll = compute_LEG_mahal(ts, xs) + compute_LEG_det(ts, xs)
-        return ll
-
+    def configure_optimizers(self):
+        optimizer = Adam(self.parameters())
+        return optimizer
 
 
     def gradient_log_likelihood(self):
@@ -248,9 +269,9 @@ class LEGFamily(torch.nn.Module):
 
     
     #we have fit as an class method instead of an external function
-    def fit(self, ts, xs):
-        get_initial_guess() #intializes N, R, B, and Lambda
-        fit_model_family(self, ts, xs)
+    # def fit(self, ts, xs):
+    #     get_initial_guess() #intializes N, R, B, and Lambda
+    #     fit_model_family(self, ts, xs)
 
 
 
