@@ -1,20 +1,21 @@
-#from matplotlib.pyplot import axis
+# from matplotlib.pyplot import axis
 import torch as torch
 from torch.optim import Adam
 import pytorch_lightning as pl
-#import numpy as np
-from typing import List, Dict, Tuple
+
+# import numpy as np
+from typing import List, Dict, Tuple, Optional
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
-from cyclic_gps.cyclic_reduction import mahal_and_det, mahal, decompose
+from cyclic_gps.cyclic_reduction import mahal_and_det, mahal, decompose, det
 import math
+import pytorch_lightning as pl
 
 patch_typeguard()
 
 
 @typechecked
-class LEGFamily(torch.nn.Module):
-    # TODO: inherit from torch.nn.module? or lightning module?
+class LEGFamily(pl.LightningModule):
 
     """
     z \sim PEG(N, R)
@@ -164,7 +165,7 @@ class LEGFamily(torch.nn.Module):
     #     offset_adder = torch.einsum("nl,mn->ml", self.B, Sig_inv_x)  # <-- m x rank
     #     # TODO: continute here.
     @typechecked
-    def compute_PEG_precision(self, ts:TensorType["num_obs"]):
+    def compute_PEG_precision(self, ts: TensorType["num_obs"]):
         """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process """
 
         diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
@@ -175,28 +176,26 @@ class LEGFamily(torch.nn.Module):
         expdT = torch.transpose(expd, 1, 2)  # exp(X^T) = (exp X)^T
         eye = torch.eye(self.G.shape[0], dtype=expd.dtype)
 
-         # from here on, expdp is called G, and expdT is called G^T in the comments
+        # from here on, expdp is called G, and expdT is called G^T in the comments
 
         # Ax = b --> x = A^{-1}b, therefore
         # (I - G^T G) x = G^T --> x = (I - G^T G)^{-1} G^T
         imgtginvgt = torch.linalg.solve(A=eye.unsqueeze(0) - expdT @ expd, b=expdT)
         imggtinvg = torch.linalg.solve(A=eye.unsqueeze(0) - expd @ expdT, b=expd)
 
-         #clarify how to go from Q in JPC notes to imgtginvgt/imggtinvg
+        # clarify how to go from Q in JPC notes to imgtginvgt/imggtinvg
 
         offdiag_blocks = -imggtinvg
 
-        
         Dcontrib1 = expd @ imgtginvgt
-        Dcontrib2 = expdT @ imggtinvpg
-
+        Dcontrib2 = expdT @ imggtinvg
 
         diag_blocks_inner = eye.unsqueeze(0) + Dcontrib1[:-1] + Dcontrib2[1:]
         diag_blocks = torch.cat(
             [
-                (eye + Dcontrib2[0]).unsqueeze(0),  #b/c d_0 = \inf
+                (eye + Dcontrib2[0]).unsqueeze(0),  # b/c d_0 = \inf
                 diag_blocks_inner,
-                (eye + Dcontrib1[-1]).unsqueeze(0), #b/c d_m = \inf
+                (eye + Dcontrib1[-1]).unsqueeze(0),  # b/c d_m = \inf
             ],
             dim=0,
         )
@@ -206,77 +205,77 @@ class LEGFamily(torch.nn.Module):
         # Get J (perfectly described by its diagonal and off-diagonal blocks)
 
     @typechecked
-    def log_likelihood(self, ts:TensorType["num_obs"], xs:TensorType["num_obs", "obs_dim"], idxs=None):
-        #Notation:
-        #v := B^T LLT^{-1} x
-        #Sigma := PEG covariance
-        #K := Sigma^{-1} + B^T(LLT)^{-1}B 
-        #LLT := Lambda(Lambda^T)
- 
-        LLT = self.calc_Lambda_Lambda_T(self.Lambda) # (obs_dim x obs_dim)
+    def log_likelihood(
+        self,
+        ts: TensorType["num_obs"],
+        xs: TensorType["num_obs", "obs_dim"],
+        idxs: Optional[TensorType["num_obs"]] = None,
+    ):
+        # Notation:
+        # v := B^T LLT^{-1} x
+        # Sigma := PEG covariance
+        # K := Sigma^{-1} + B^T(LLT)^{-1}B
+        # LLT := Lambda(Lambda^T)
 
-        #LL^T is symmetric
-        x_LLT_inv = torch.linalg.solve(A=LLT, B=xs.T).T # (num_obs x obs_dim)
+        LLT = self.calc_Lambda_Lambda_T(self.Lambda)  # (obs_dim x obs_dim)
+
+        # LL^T is symmetric
+        # LL^{T} v = xs^{T} -> v = ((LL^{T})^{-1} xs^{T})^{T} = xs L^{-1} L^{T}
+        x_LLT_inv = torch.linalg.solve(A=LLT, B=xs.T).T  # (num_obs x obs_dim)
         LLT_mahal = x_LLT_inv * xs
 
-        #could make this more efficient as lambda is triangular?
-        LLT_det = torch.logdet(LLT) * xs.shape[0] # "real" shape of LLT is block diagional with num_obs blocks each of size (obs_dim x obs_dim)
-        
+        # could make this more efficient as lambda is triangular?
+        LLT_det = (
+            torch.logdet(LLT) * xs.shape[0]
+        )  # "real" shape of LLT is block diagional with num_obs blocks each of size (obs_dim x obs_dim)
 
-        #we want the matrix multiplication of B.T @ x_LLT_inv.T = (x_LLT_inv @ B).T
-        #so not sure why he doesn't have a transpose here
+        # we want the matrix multiplication of B.T @ x_LLT_inv.T = (x_LLT_inv @ B).T
+        # so not sure why he doesn't have a transpose here
         v = x_LLT_inv @ self.B
-        #v_entries = torch.einsum('nl,mn->ml', self.B, x_LLT_inv) #(m x rank) b/c equal to x LLT_inv B (which is equal to (B^T LLT_inv x^T)^T)
-        
-        #v = torch.zeros(ts.shape[0], self.G.shape[0])
-        #v = v.scatter_(dim)
+        # v_entries = torch.einsum('nl,mn->ml', self.B, x_LLT_inv) #(m x rank) b/c equal to x LLT_inv B (which is equal to (B^T LLT_inv x^T)^T)
 
+        # v = torch.zeros(ts.shape[0], self.G.shape[0])
+        # v = v.scatter_(dim)
+
+        # compute the PEG precision matrix from its parameters and ts:
         Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
+        # cyclic reduction decomposition of the PEG precision:
         Sigma_inv_decomp = decompose(Sigma_inv_Rs, Sigma_inv_Os)
         Sigma_inv_det = det(Sigma_inv_decomp)
 
         LLT_inv_B = torch.linalg.solve(A=LLT, B=self.B)
-        B_T_LLT_inv_B = self.B.T @ LLT_inv_B  #trying without einsum
-        
-        #note that the "real" B is block diagional with diagional blocks given by B, and same with the "real" LLT
-        #so the "real" matrix B_T_LLT_inv_B we are concerned with has diagional blocks equal to B_T_LLT_inv_B
+        B_T_LLT_inv_B = self.B.T @ LLT_inv_B  # trying without einsum
+
+        # note that the "real" B is block diagional with diagional blocks given by B, and same with the "real" LLT
+        # so the "real" matrix B_T_LLT_inv_B we are concerned with has diagional blocks equal to B_T_LLT_inv_B
         K_Rs = Sigma_inv_Rs + B_T_LLT_inv_B.unsqueeze(0)
         K_Os = Sigma_inv_Os
 
         K_mahal, K_det = mahal_and_det(Rs=K_Rs, Os=K_Os, x=v)
         mahal = LLT_mahal - K_mahal
 
-        
-        det = LLT_det + K_det - Sigma_inv_det #log rules
+        det = LLT_det + K_det - Sigma_inv_det  # log rules
 
         return -0.5 * (mahal + det)
 
-    
     def training_step(self, train_batch, batch_idx):
         t, x = train_batch
         nobs = x.shape[0] * x.shape[1]
         loss = self.log_likelihood(t, x)
-        loss = -loss/nobs
+        loss = -loss / nobs
         return loss
 
     def configure_optimizers(self):
         optimizer = Adam(self.parameters())
         return optimizer
 
-
     def gradient_log_likelihood(self):
         raise NotImplementedError
 
-    
-    #we have fit as an class method instead of an external function
+    # we have fit as an class method instead of an external function
     # def fit(self, ts, xs):
     #     get_initial_guess() #intializes N, R, B, and Lambda
     #     fit_model_family(self, ts, xs)
-
-
-
-
-
 
 
 # TODO: add implementation for CeleriteFamily

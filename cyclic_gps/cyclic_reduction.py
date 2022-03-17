@@ -392,14 +392,13 @@ def mahal_and_det(
 
     ytilde = x
 
-    
-    #What is the idea of this "mahal" function?
-    #Compute ||L^{-1}x||^2 for a given J
-    #So we show that this is equal to ||D^{-1}(P_m x)||^2 + ||L~^{-1}Q_m y - UD^{-1}(P_m y)||^2
-    #Since for a given decompose_loop we compute D, U, and J~, we can compute this recursively 
-    #by first computing ||D^{-1}(P_m x)||^2 and then calling the function recursively 
-    #with J~ and v = Q_m y - UD^{-1}(P_m y) which will give us ||L~^{-1}v||^2 
-    
+    # What is the idea of this "mahal" function?
+    # Compute ||L^{-1}x||^2 for a given J
+    # So we show that this is equal to ||D^{-1}(P_m x)||^2 + ||L~^{-1}Q_m y - UD^{-1}(P_m y)||^2
+    # Since for a given decompose_loop we compute D, U, and J~, we can compute this recursively
+    # by first computing ||D^{-1}(P_m x)||^2 and then calling the function recursively
+    # with J~ and v = Q_m y - UD^{-1}(P_m y) which will give us ||L~^{-1}v||^2
+
     while Rs.shape[0] > 1:
         # get the decomposition of D and U for this state of the cyclic reduction recursion
         (numblocks, Ks_even, F, G), (Rs, Os) = decompose_loop(Rs, Os)
@@ -436,8 +435,15 @@ def solve(decomp, y: TensorType["num_blocks", "block_dim"]):
 
 
 def det(decomp):
+    # TODO: change name? this is logdet.
     # computes log |J| given L which is a cyclic reduction decomposition of J
+    """Our CR implementation effectively performs a Block Cholesky decompositon of J:
+    LL^{\top} = J.
+    The determinant in this case is -> det =  \prod diag(D_i)^2
+    The log determinant -> logdet =  \sum 2* log (diag(D_i))
+    """
     ms, Ds, Fs, Gs = decomp
+    # concat together all the diagonal elements from all the diagonal blocks
     diags = torch.cat([torch.cat([torch.diag(x) for x in y]) for y in Ds])
     return 2 * torch.sum(torch.log(diags))
 
