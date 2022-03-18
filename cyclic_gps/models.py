@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 from typing import List, Dict, Tuple, Optional
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
-from cyclic_gps.cyclic_reduction import mahal_and_det, mahal, decompose, det
+from cyclic_gps.cyclic_reduction import mahal_and_det, decompose, det
 import math
 import pytorch_lightning as pl
 
@@ -22,11 +22,11 @@ class LEGFamily(pl.LightningModule):
     x(t) \sim \mathcal{N}(Bz(t), \Lambda \Lambda^{\top})
     """
 
-    def __init__(self, rank: int, n: int, train: bool = False) -> None:
+    def __init__(self, rank: int, obs_dim: int, train: bool = False) -> None:
         # TODO: change n -> obs dim ?
         super().__init__()
         self.rank = rank
-        self.n = n
+        self.obs_dim = obs_dim
 
         # everything below and including diagonal in (self.rank, self.rank) mat
         self.N_idxs = self.inds_to_tuple(
@@ -47,14 +47,14 @@ class LEGFamily(pl.LightningModule):
         # fill in parameters inside mats value
         # zeros.index_put_(indices=inds, values=torch.arange(inds[0].shape).float())
 
-        # everything below and including diagonal in (self.n, self.n) mat
+        # everything below and including diagonal in (self.obs_dim, self.obs_dim) mat
         self.Lambda_idxs = self.inds_to_tuple(
-            torch.tril_indices(row=self.n, col=self.n, offset=0)
+            torch.tril_indices(row=self.obs_dim, col=self.obs_dim, offset=0)
         )
         self.Lambda_params = torch.empty(len(self.Lambda_idxs[0]), requires_grad=train)
         torch.nn.init.uniform_(self.Lambda_params)  # initialize (later override)
 
-        self.B = torch.empty((self.n, self.rank), requires_grad=train)
+        self.B = torch.empty((self.obs_dim, self.rank), requires_grad=train)
         torch.nn.init.uniform_(self.B)  # initialize (later override)
 
         #########################################################################
@@ -94,13 +94,13 @@ class LEGFamily(pl.LightningModule):
         self.R_params.data = R[self.R_idxs]
 
     def set_initial_Lambda(self) -> None:
-        Lambda = 0.1 * torch.eye(self.n)
+        Lambda = 0.1 * torch.eye(self.obs_dim)
         # Jackson had the below for the case that params are provided. but L = cholesky(LL.T)
         # Lambda = torch.linalg.cholesky(Lambda @ Lambda.T)
         self.Lambda_params.data = Lambda[self.Lambda_idxs]
 
     def set_initial_B(self) -> None:
-        B = torch.ones((self.n, self.rank))
+        B = torch.ones((self.obs_dim, self.rank))
         B_torch = 0.5 * B / torch.sqrt(torch.sum(B**2, dim=1, keepdim=True))
         self.B.data = B_torch  # dense, no special indexing like above
 
@@ -127,7 +127,7 @@ class LEGFamily(pl.LightningModule):
         self.register_buffer("R", R)
 
     def Lambda_from_params(self) -> None:
-        Lambda = torch.zeros(self.n, self.n, dtype=self.Lambda_params.dtype)
+        Lambda = torch.zeros(self.obs_dim, self.obs_dim, dtype=self.Lambda_params.dtype)
         Lambda[self.Lambda_idxs] = self.Lambda_params
         self.register_buffer("Lambda", Lambda)
 
@@ -180,8 +180,8 @@ class LEGFamily(pl.LightningModule):
 
         # Ax = b --> x = A^{-1}b, therefore
         # (I - G^T G) x = G^T --> x = (I - G^T G)^{-1} G^T
-        imgtginvgt = torch.linalg.solve(A=eye.unsqueeze(0) - expdT @ expd, b=expdT)
-        imggtinvg = torch.linalg.solve(A=eye.unsqueeze(0) - expd @ expdT, b=expd)
+        imgtginvgt = torch.linalg.solve(eye.unsqueeze(0) - expdT @ expd, expdT)
+        imggtinvg = torch.linalg.solve(eye.unsqueeze(0) - expd @ expdT, expd)
 
         # clarify how to go from Q in JPC notes to imgtginvgt/imggtinvg
 
@@ -207,8 +207,8 @@ class LEGFamily(pl.LightningModule):
     @typechecked
     def log_likelihood(
         self,
-        ts: TensorType["batch", "num_obs"],
-        xs: TensorType["batch", "num_obs", "obs_dim"],
+        ts: TensorType["num_obs"],
+        xs: TensorType["num_obs", "obs_dim"],
         idxs: Optional[TensorType["num_obs"]] = None,
     ) -> TensorType([]):
         # Notation:
@@ -216,28 +216,44 @@ class LEGFamily(pl.LightningModule):
         # Sigma := PEG covariance
         # K := Sigma^{-1} + B^T(LLT)^{-1}B
         # LLT := Lambda(Lambda^T)
+        # tildeL := num_obs * obs_dim X num_obs * obs_dim matrix, with diagonal blocks = LLT
+        # TODO: everything should be expanded into block form
+        # grab params and put these into matrices accessible as self.Lambda, self.N ...
 
-        # grab params and put these into matrices
         self.Lambda_from_params()
         self.N_from_params()
         self.R_from_params()
-        self.B
+        # self.B is already computed since it's dense.
+        self.calc_G()
 
-        LLT = self.calc_Lambda_Lambda_T(self.Lambda)  # (obs_dim x obs_dim)
-
+        LLT = self.calc_Lambda_Lambda_T(
+            self.Lambda
+        )  # per-measurment observation noise, shape(obs_dim x obs_dim)
         # LL^T is symmetric ->
-        # LL^{T} v = xs^{T} -> v = ((LL^{T})^{-1} xs^{T})^{T} = xs L^{-1} L^{T}
-        x_LLT_inv = torch.linalg.solve(LLT, xs.T).T  # (num_obs x obs_dim)
-        LLT_mahal = x_LLT_inv * xs
+        # LL^{T} v = xs^{T} -> v = ((LL^{T})^{-1} xs^{T})^{T} = xs  (LL^{T})^{-1} --> (num_obs X obs_dim) times (obs_dim X obs_dim)
+        x_LLT_inv = torch.linalg.solve(
+            LLT, xs.T
+        ).T  # (obs_dim x obs_dim) * (num_obs x obs_dim)^{T} -> (obs_dim x num_obs)^{T} -> (num_obs X obs_dim)
+        # torch.linalg.solve standard  A= (2X2), B= (2X1) -> v = (2X1). if you have 100 in the last dimension of b, you solve 100 systems.
+        LLT_mahal = torch.sum(
+            x_LLT_inv * xs
+        )  # (num_obs X obs_dim) * (num_obs X obs_dim) reduce to scalar
+        # effective dot product. first elemntewise multiplication, then sum. TODO: think again how this works out.
+
+        # final result: x^t (LL^T)^{-1} x -> typically: (1 X obs_dim) X (obs_dim X obs_dim) X (obs_dim X 1) -> (1 X 1)
+        # (v^{T} K^{-1} v) but we're computing v K^{-1} v^{T}
 
         # could make this more efficient as lambda is triangular?
+        # =|\tilde{Lambda}|. take the logdet of each block, and multiply by the number of blocks. equivalent to summing
         LLT_det = (
             torch.logdet(LLT) * xs.shape[0]
         )  # "real" shape of LLT is block diagional with num_obs blocks each of size (obs_dim x obs_dim)
 
         # we want the matrix multiplication of B.T @ x_LLT_inv.T = (x_LLT_inv @ B).T
         # so not sure why he doesn't have a transpose here
-        v = x_LLT_inv @ self.B
+        v = (
+            x_LLT_inv @ self.B
+        )  # -> (num_obs X obs_dim) X (obs_dim X rank) -> (num_obs X rank)
         # v_entries = torch.einsum('nl,mn->ml', self.B, x_LLT_inv) #(m x rank) b/c equal to x LLT_inv B (which is equal to (B^T LLT_inv x^T)^T)
 
         # v = torch.zeros(ts.shape[0], self.G.shape[0])
@@ -247,29 +263,36 @@ class LEGFamily(pl.LightningModule):
         Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
         # cyclic reduction decomposition of the PEG precision:
         Sigma_inv_decomp = decompose(Sigma_inv_Rs, Sigma_inv_Os)
-        Sigma_inv_det = det(Sigma_inv_decomp)
+        # compute determinant using the decomposition results:
+        Sigma_inv_det = det(Sigma_inv_decomp)  # = |\Sigma^{-1}|
 
-        LLT_inv_B = torch.linalg.solve(A=LLT, B=self.B)
-        B_T_LLT_inv_B = self.B.T @ LLT_inv_B  # trying without einsum
+        LLT_inv_B = torch.linalg.solve(LLT, self.B)
+        # (obs_dim X obs_dim) * (obs_dim X rank) ->(obs_dim X rank)
+        B_T_LLT_inv_B = self.B.T @ LLT_inv_B
+        # (rank x obs_dim) (obs_dim X rank) -> (rank X rank) trying without einsum
 
-        # note that the "real" B is block diagional with diagional blocks given by B, and same with the "real" LLT
+        # note that the "real" \tilde{B} is block-diagional with diagional blocks given by B, and same with the "real" \tilde{\Lambda}
         # so the "real" matrix B_T_LLT_inv_B we are concerned with has diagional blocks equal to B_T_LLT_inv_B
         K_Rs = Sigma_inv_Rs + B_T_LLT_inv_B.unsqueeze(0)
-        K_Os = Sigma_inv_Os
+        # add to the diag blocks of the PEG precision
+        K_Os = Sigma_inv_Os  # don't touch off-diags.
 
-        K_mahal, K_det = mahal_and_det(Rs=K_Rs, Os=K_Os, x=v)
+        # now we have a block-tridiagonal matrix K which we can operate on using cyclic reduction
+        K_mahal, K_det = mahal_and_det(Rs=K_Rs, Os=K_Os, x=v)  # giving us two scalars.
         mahal = LLT_mahal - K_mahal
 
-        det = LLT_det + K_det - Sigma_inv_det  # log rules
+        log_det = LLT_det + K_det - Sigma_inv_det  # log rules
 
-        return -0.5 * (mahal + det)
+        return -0.5 * (mahal + log_det)
 
     def training_step(self, train_batch, batch_idx):
         t, x = train_batch
         nobs = x.shape[0] * x.shape[1]
-        loss = self.log_likelihood(t, x)
+        # eliminate the batch dimension of 1
+        loss = self.log_likelihood(t.squeeze(0), x.squeeze(0))
         loss = -loss / nobs  # TODO: why divide by n_obs?
-        self.log(loss)
+        print(loss)
+        self.log("NLL", loss)
         return loss
 
     def configure_optimizers(self):

@@ -37,7 +37,7 @@ assert torch.allclose(example[0], sample1_ts.unsqueeze(0))
 
 dl = DataLoader(dataset=dataset, batch_size=1)
 
-LEG_model = LEGFamily(rank=RANK, n=sample1_ts.shape[0], train=True)
+LEG_model = LEGFamily(rank=RANK, obs_dim=vals.shape[1], train=True)
 
 trainer = pl.Trainer(max_epochs=MAX_EPOCHS)
 trainer.fit(model=LEG_model, train_dataloaders=dl)
