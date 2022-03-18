@@ -4,7 +4,10 @@ from setuptools import find_packages, setup
 version = None
 
 install_requires = [
+    "pytorch-lightning",
     "torch",
+    "matplotlib",
+    "scipy",
     "black",
     "pytest",
     "torchtyping",

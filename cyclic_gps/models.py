@@ -54,7 +54,7 @@ class LEGFamily(pl.LightningModule):
         self.Lambda_params = torch.empty(len(self.Lambda_idxs[0]), requires_grad=train)
         torch.nn.init.uniform_(self.Lambda_params)  # initialize (later override)
 
-        self.B = torch.empty((self.n, self.rank))
+        self.B = torch.empty((self.n, self.rank), requires_grad=train)
         torch.nn.init.uniform_(self.B)  # initialize (later override)
 
         #########################################################################
@@ -101,7 +101,7 @@ class LEGFamily(pl.LightningModule):
 
     def set_initial_B(self) -> None:
         B = torch.ones((self.n, self.rank))
-        B_torch = 0.5 * B / torch.sqrt(torch.sum(B ** 2, dim=1, keepdim=True))
+        B_torch = 0.5 * B / torch.sqrt(torch.sum(B**2, dim=1, keepdim=True))
         self.B.data = B_torch  # dense, no special indexing like above
 
     @property
@@ -133,9 +133,9 @@ class LEGFamily(pl.LightningModule):
 
     def calc_G(self) -> None:
         """describe G here. it's an important quantity of LEG, needed for cov/precision"""
-        G: TensorType[
-            "latent_dim", "latent_dim"
-        ] = self.N @ self.N.T + self.R - self.R.T
+        G: TensorType["latent_dim", "latent_dim"] = (
+            self.N @ self.N.T + self.R - self.R.T
+        )
         # add small diag noise
         G += torch.eye(self.N.shape[0], dtype=self.N.dtype) * (1e-5)
         self.register_buffer("G", G)
@@ -148,7 +148,7 @@ class LEGFamily(pl.LightningModule):
                 Lambda_Lambda_T.shape[0], dtype=Lambda_Lambda_T.dtype
             )
         else:  # TODO: check what this condition covers
-            Lambda_Lambda_T = torch.diag(Lambda ** 2 + 1e-9)
+            Lambda_Lambda_T = torch.diag(Lambda**2 + 1e-9)
         return Lambda_Lambda_T
 
     # def distribution(self, inputs, outputs, indices, Sig):
@@ -166,7 +166,7 @@ class LEGFamily(pl.LightningModule):
     #     # TODO: continute here.
     @typechecked
     def compute_PEG_precision(self, ts: TensorType["num_obs"]):
-        """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process """
+        """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process"""
 
         diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
         # exponentiate the diffs, TODO: move to Jackson's efficient method?
@@ -207,21 +207,27 @@ class LEGFamily(pl.LightningModule):
     @typechecked
     def log_likelihood(
         self,
-        ts: TensorType["num_obs"],
-        xs: TensorType["num_obs", "obs_dim"],
+        ts: TensorType["batch", "num_obs"],
+        xs: TensorType["batch", "num_obs", "obs_dim"],
         idxs: Optional[TensorType["num_obs"]] = None,
-    ):
+    ) -> TensorType([]):
         # Notation:
         # v := B^T LLT^{-1} x
         # Sigma := PEG covariance
         # K := Sigma^{-1} + B^T(LLT)^{-1}B
         # LLT := Lambda(Lambda^T)
 
+        # grab params and put these into matrices
+        self.Lambda_from_params()
+        self.N_from_params()
+        self.R_from_params()
+        self.B
+
         LLT = self.calc_Lambda_Lambda_T(self.Lambda)  # (obs_dim x obs_dim)
 
-        # LL^T is symmetric
+        # LL^T is symmetric ->
         # LL^{T} v = xs^{T} -> v = ((LL^{T})^{-1} xs^{T})^{T} = xs L^{-1} L^{T}
-        x_LLT_inv = torch.linalg.solve(A=LLT, B=xs.T).T  # (num_obs x obs_dim)
+        x_LLT_inv = torch.linalg.solve(LLT, xs.T).T  # (num_obs x obs_dim)
         LLT_mahal = x_LLT_inv * xs
 
         # could make this more efficient as lambda is triangular?
@@ -262,11 +268,12 @@ class LEGFamily(pl.LightningModule):
         t, x = train_batch
         nobs = x.shape[0] * x.shape[1]
         loss = self.log_likelihood(t, x)
-        loss = -loss / nobs
+        loss = -loss / nobs  # TODO: why divide by n_obs?
+        self.log(loss)
         return loss
 
     def configure_optimizers(self):
-        optimizer = Adam(self.parameters())
+        optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
         return optimizer
 
     def gradient_log_likelihood(self):
@@ -319,4 +326,3 @@ class LEGFamily(pl.LightningModule):
 #         pB = tf.reshape(B, (self.n * self.ell,))
 #         pL = tf.gather_nd(Lambda, self.Lambda_idxs)
 #         return tf.concat([pN, pR, pB, pL], axis=0)
-
