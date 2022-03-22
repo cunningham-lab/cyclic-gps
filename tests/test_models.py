@@ -5,7 +5,7 @@ import numpy as np
 def test_leg_family():
     from cyclic_gps.models import LEGFamily
 
-    leg_family = LEGFamily(ell=3, n=2)
+    leg_family = LEGFamily(rank=3, obs_dim=2)
     assert len(leg_family.N_params) == 6
 
     assert len(leg_family.R_params) == 3
@@ -25,25 +25,30 @@ def test_leg_family():
 
     leg_family.set_initial_B()
 
-    zeros = torch.zeros(leg_family.ell, leg_family.ell)
+    zeros = torch.zeros(leg_family.rank, leg_family.rank)
     zeros[leg_family.N_idxs] = leg_family.N_params
     assert torch.allclose(
-        zeros, torch.eye(leg_family.ell)
+        zeros, torch.eye(leg_family.rank)
     )  # holds for the current init
 
-    zeros_R = torch.zeros(leg_family.ell, leg_family.ell)
+    zeros_R = torch.zeros(leg_family.rank, leg_family.rank)
     zeros_R[leg_family.R_idxs] = leg_family.R_params
     # print(zeros.scatter_(dim=0, index=inds, src=leg_family.R_params))
 
     # our B is similar to Jackson's
-    B = np.ones((leg_family.n, leg_family.ell))
-    B_numpy = 0.5 * B / np.sqrt(np.sum(B ** 2, axis=1, keepdims=True))
+    B = np.ones((leg_family.obs_dim, leg_family.rank))
+    B_numpy = 0.5 * B / np.sqrt(np.sum(B**2, axis=1, keepdims=True))
     assert torch.allclose(leg_family.B, torch.tensor(B_numpy).float())
 
     leg_family.Lambda_from_params()  # fill in the matrix
     lambda_lambda_t = leg_family.calc_Lambda_Lambda_T(leg_family.Lambda)
     assert lambda_lambda_t.shape == (2, 2)  # observation ddims
     assert torch.allclose(lambda_lambda_t, lambda_lambda_t.T)  # symmetry
+
+    leg_family.R_from_params()
+    leg_family.N_from_params()
+    print("This is G:")
+    print(leg_family.calc_G())
 
 
 def test_exp_mult():
