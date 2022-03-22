@@ -197,7 +197,7 @@ def interleave(a, b):
 
 
 @typechecked
-def decompose_loop(
+def decompose_step(
     Rs: TensorType["num_dblocks", "block_dim", "block_dim"],
     Os: TensorType["num_offdblocks", "block_dim", "block_dim"],
 ) -> Tuple[
@@ -287,7 +287,7 @@ def decompose(
     ms = []
     while len(Rs) > 1:
         # we keep splitting to evens and odds
-        (num_dblocks, Ks_even, F, G), (Rs, Os) = decompose_loop(Rs, Os)
+        (num_dblocks, Ks_even, F, G), (Rs, Os) = decompose_step(Rs, Os)
         ms += [num_dblocks]  # overwritten, for the submatrix we're looking at
         Ds += [Ks_even]
         Fs += [F]
@@ -395,13 +395,13 @@ def mahal_and_det(
     # What is the idea of this "mahal" function?
     # Compute ||L^{-1}x||^2 for a given J
     # So we show that this is equal to ||D^{-1}(P_m x)||^2 + ||L~^{-1}Q_m y - UD^{-1}(P_m y)||^2
-    # Since for a given decompose_loop we compute D, U, and J~, we can compute this recursively
+    # Since for a given decompose_step we compute D, U, and J~, we can compute this recursively
     # by first computing ||D^{-1}(P_m x)||^2 and then calling the function recursively
     # with J~ and v = Q_m y - UD^{-1}(P_m y) which will give us ||L~^{-1}v||^2
 
     while Rs.shape[0] > 1:
         # get the decomposition of D and U for this state of the cyclic reduction recursion
-        (numblocks, Ks_even, F, G), (Rs, Os) = decompose_loop(Rs, Os)
+        (numblocks, Ks_even, F, G), (Rs, Os) = decompose_step(Rs, Os)
 
         # det
         det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
@@ -411,7 +411,7 @@ def mahal_and_det(
         newx = torch.triangular_solve(input=y.unsqueeze(-1), A=Ks_even, upper=False)[0][
             ..., 0
         ]
-        mahal += torch.sum(newx ** 2)
+        mahal += torch.sum(newx**2)
 
         # computes Q_m y - UD^{-1}(P_m y)
         ytilde = ytilde[1::2] - Ux(F, G, newx)
@@ -423,7 +423,7 @@ def mahal_and_det(
     newx = torch.triangular_solve(input=y.unsqueeze(-1), A=Ks_even, upper=False)[0][
         ..., 0
     ]
-    mahal += torch.sum(newx ** 2)
+    mahal += torch.sum(newx**2)
 
     return mahal, 2 * det
 
@@ -491,4 +491,3 @@ def inverse_blocks(decomp):
         )
 
     return Sig_diag, Sig_off
-
