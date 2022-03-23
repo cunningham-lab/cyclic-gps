@@ -7,6 +7,7 @@ install_requires = [
     "pytorch-lightning",
     "torch",
     "matplotlib",
+    "gpytorch",
     "scipy",
     "black",
     "pytest",

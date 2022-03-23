@@ -1,9 +1,9 @@
 import torch
 import numpy as np
+from cyclic_gps.models import LEGFamily
 
 
 def test_leg_family():
-    from cyclic_gps.models import LEGFamily
 
     leg_family = LEGFamily(rank=3, obs_dim=2)
     assert len(leg_family.N_params) == 6
@@ -47,7 +47,6 @@ def test_leg_family():
 
     leg_family.R_from_params()
     leg_family.N_from_params()
-    print("This is G:")
     print(leg_family.calc_G())
 
 
@@ -63,3 +62,44 @@ def test_exp_mult():
 
     # matrix exp doesn't change  shapes
     assert torch.matrix_exp(out).shape == out.shape
+
+
+def test_BTop_LambdaLambdaTop_inv_B():
+    rank = 3
+    leg_family = LEGFamily(rank=rank, obs_dim=2)
+    # compute Lambda Lambda^{\top}
+    LambdaLambdaTop = leg_family.calc_Lambda_Lambda_T(leg_family.Lambda)
+    # instead of explicitly inverting and computing (\Lambda\Lambda^{\top})^{-1} B:
+    LambdaLambdaTop_inv_B = torch.linalg.solve(LambdaLambdaTop, leg_family.B)
+    BTop_LambdaLambdaTop_inv_B = leg_family.B.T @ LambdaLambdaTop_inv_B
+    assert BTop_LambdaLambdaTop_inv_B.shape == (rank, rank)
+
+
+def test_compute_PEG_precision():
+    rank = 3
+    num_obs = 100
+    leg_family = LEGFamily(rank=rank, obs_dim=2)
+    out = leg_family.compute_PEG_precision(
+        torch.linspace(start=0.0, end=10.0, steps=num_obs)
+    )
+    assert out[0].shape == (num_obs, rank, rank)
+    assert out[1].shape == (num_obs - 1, rank, rank)
+
+
+def test_posterior():
+    rank = 3
+    num_obs = 100
+    leg_family = LEGFamily(rank=rank, obs_dim=2)
+    posterior_mean, posterior_cov, posterior_precision = leg_family.posterior(
+        torch.linspace(start=0.0, end=10.0, steps=num_obs)
+    )
+
+    # assert shapes
+    assert posterior_precision["diag_blocks"].shape == (num_obs, rank, rank)
+    assert posterior_precision["off_diag_blocks"].shape == (num_obs - 1, rank, rank)
+    assert posterior_mean.shape == (num_obs, rank)
+    assert posterior_cov.shape == (num_obs, rank, rank)
+
+    # assert that the precision, posterior, are positive semi-definite
+
+    # make_up_data from that process and do posterior inference. can you fit?

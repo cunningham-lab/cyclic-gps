@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 from typing import List, Dict, Tuple, Optional
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
-from cyclic_gps.cyclic_reduction import mahal_and_det, decompose, det
+from cyclic_gps.cyclic_reduction import inverse_blocks, mahal_and_det, decompose, det
 import math
 import pytorch_lightning as pl
 
@@ -33,14 +33,12 @@ class LEGFamily(pl.LightningModule):
             torch.tril_indices(row=self.rank, col=self.rank, offset=0)
         )
         self.N_params = torch.empty(len(self.N_idxs[0]), requires_grad=train)
-        torch.nn.init.uniform_(self.N_params)  # initialize (later override)
 
         # everything below and including lower off-diagonal in (self.rank, self.rank) mat
         self.R_idxs = self.inds_to_tuple(
             torch.tril_indices(row=self.rank, col=self.rank, offset=-1)
         )
         self.R_params = torch.empty(len(self.R_idxs[0]), requires_grad=train)
-        torch.nn.init.uniform_(self.R_params)  # initialize (later override)
 
         # convert to tuple
         # inds = (leg_family.N_idxs[0], leg_family.N_idxs[1])
@@ -52,13 +50,13 @@ class LEGFamily(pl.LightningModule):
             torch.tril_indices(row=self.obs_dim, col=self.obs_dim, offset=0)
         )
         self.Lambda_params = torch.empty(len(self.Lambda_idxs[0]), requires_grad=train)
-        torch.nn.init.uniform_(self.Lambda_params)  # initialize (later override)
 
         self.B = torch.empty((self.obs_dim, self.rank), requires_grad=train)
-        torch.nn.init.uniform_(self.B)  # initialize (later override)
 
         #########################################################################
         self.get_initial_guess()
+
+        self.register_model_matrices_from_params()
 
         # self.peg_precision = compute_PEG_precision()
         # self.
@@ -78,6 +76,8 @@ class LEGFamily(pl.LightningModule):
         # observation model params
         self.set_initial_B()
         self.set_initial_Lambda()
+        # TODO: if needed do something like
+        # torch.nn.init.uniform_(self.Lambda_params)
 
     def set_initial_N(self) -> None:
         """modify the initial data of self.N_params"""
@@ -151,6 +151,14 @@ class LEGFamily(pl.LightningModule):
             Lambda_Lambda_T = torch.diag(Lambda**2 + 1e-9)
         return Lambda_Lambda_T
 
+    def register_model_matrices_from_params(self) -> None:
+        """creates matrices using the current params, registered in buffer."""
+        self.Lambda_from_params()
+        self.N_from_params()
+        self.R_from_params()
+        # self.B is already computed since it's dense.
+        self.calc_G()  # from N and R
+
     # def distribution(self, inputs, outputs, indices, Sig):
     #     # note: Sig = LambdaLambdaT, have to call the above function for that.
     #     # TODO: type assertions
@@ -164,8 +172,14 @@ class LEGFamily(pl.LightningModule):
     #     # TODO: check how this adds offset?
     #     offset_adder = torch.einsum("nl,mn->ml", self.B, Sig_inv_x)  # <-- m x rank
     #     # TODO: continute here.
+
     @typechecked
-    def compute_PEG_precision(self, ts: TensorType["num_obs"]):
+    def compute_PEG_precision(
+        self, ts: TensorType["num_obs"]
+    ) -> Tuple[
+        TensorType["num_obs", "rank", "rank"],
+        TensorType["num_obs_minus_one", "rank", "rank"],
+    ]:
         """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process"""
 
         diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
@@ -204,6 +218,17 @@ class LEGFamily(pl.LightningModule):
 
         # Get J (perfectly described by its diagonal and off-diagonal blocks)
 
+    def sample_from_prior(
+        self, ts: TensorType["num_obs"]
+    ) -> TensorType["num_samples", "obs_dim"]:
+        """sample from the prior"""
+
+        # compute the prior covariance matrix, mean is zero.
+        diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
+        expd = torch.matrix_exp(-0.5 * self.G.unsqueeze(0) * diffs.reshape(-1, 1, 1))
+        expdT = torch.transpose(expd, 1, 2)  # exp(X^T) = (exp X)^T
+        eye = torch.eye(self.G.shape[0], dtype=expd.dtype)
+
     @typechecked
     def log_likelihood(
         self,
@@ -217,14 +242,9 @@ class LEGFamily(pl.LightningModule):
         # K := Sigma^{-1} + B^T(LLT)^{-1}B
         # LLT := Lambda(Lambda^T)
         # tildeL := num_obs * obs_dim X num_obs * obs_dim matrix, with diagonal blocks = LLT
-        # TODO: everything should be expanded into block form
-        # grab params and put these into matrices accessible as self.Lambda, self.N ...
 
-        self.Lambda_from_params()
-        self.N_from_params()
-        self.R_from_params()
-        # self.B is already computed since it's dense.
-        self.calc_G()
+        # grab params and put these into matrices accessible as self.Lambda, self.N ...
+        self.register_model_matrices_from_params()
 
         LLT = self.calc_Lambda_Lambda_T(
             self.Lambda
@@ -291,13 +311,57 @@ class LEGFamily(pl.LightningModule):
         # eliminate the batch dimension of 1
         loss = self.log_likelihood(t.squeeze(0), x.squeeze(0))
         loss = -loss / nobs  # TODO: why divide by n_obs?
-        print(loss)
         self.log("NLL", loss)
         return loss
 
     def configure_optimizers(self):
         optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
         return optimizer
+
+    def posterior(
+        self,
+        ts: TensorType["num_obs"],
+        xs: TensorType["num_obs", "obs_dim"],
+    ):
+        """
+        Cov
+        1. compute Lambda Lambda^{\top} (obs_dim X obs_dim)
+        2. make it into the big blocked version \tilde{\Lambda}
+        3. multiply by \tilde{B} on right and \tilde{B}^{\top} on left
+        4. compute PEG precision
+        5. Add diags and off-diags
+        6. decompose with CR
+        7. invert
+
+        """
+        # get parameters
+        self.register_model_matrices_from_params()
+        # compute Lambda Lambda^{\top}
+        LambdaLambdaTop = self.calc_Lambda_Lambda_T(self.Lambda)
+        # instead of explicitly inverting and computing (\Lambda\Lambda^{\top})^{-1} B:
+        LambdaLambdaTop_inv_B = torch.linalg.solve(LambdaLambdaTop, self.B)
+        BTop_LambdaLambdaTop_inv_B = self.B.T @ LambdaLambdaTop_inv_B
+        # we have a (rank, rank) object above. we should add it to every diagonal block of \Sigma^{-1}
+        Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
+
+        posterior_precision = {}
+        posterior_precision["diag_blocks"] = Sigma_inv_Rs + BTop_LambdaLambdaTop_inv_B
+        posterior_precision["off_diag_blocks"] = Sigma_inv_Os
+
+        posterior_precision_cr = decompose(**posterior_precision)
+        # invert to obtain posterior covariance
+        posterior_cov = {}
+        posterior_cov["diag_blocks"], posterior_cov["off_diag_blocks"] = inverse_blocks(
+            posterior_precision_cr
+        )
+
+        # compute the mean
+        BTop_LambdaLambdaTop_inv = LambdaLambdaTop_inv_B.T
+        # use symetry of LambdaLambdaTop_inv above
+        posterior_mean = BTop_LambdaLambdaTop_inv @ xs.T
+        # (rank X num_obs) X (num_obs X obs_dim) X (obs_dim X num_obs) -> (rank X num_obs)
+        # transpose to get (num_obs X rank)
+        return posterior_mean.T, posterior_cov, posterior_precision
 
     def gradient_log_likelihood(self):
         raise NotImplementedError

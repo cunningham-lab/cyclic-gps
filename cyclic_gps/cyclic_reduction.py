@@ -4,6 +4,8 @@ from torchtyping import TensorType, patch_typeguard
 import numpy as np
 from typing import Tuple, List, Union
 from typeguard import typechecked
+from gpytorch.utils.cholesky import psd_safe_cholesky
+from gpytorch.utils.errors import NotPSDError
 
 patch_typeguard()
 
@@ -219,7 +221,13 @@ def decompose_step(
     assert num_dblocks == num_offdblocks + 1
     num_dblocks = Rs.shape[0]
     Rs_even = Rs[::2]  # R_0, R_2, ...
-    Ks_even = torch.linalg.cholesky(Rs_even)  # Cholesky per diag block
+
+    Ks_even = psd_safe_cholesky(Rs_even)  # Cholesky per diag block
+
+    # try:
+    #     Ks_even = psd_safe_cholesky(Rs_even)  # Cholesky per diag block
+    # except:
+    #     print(Rs_even)
 
     Os_even = Os[::2]  # O_0, O_2, ...
     Os_odd = Os[1::2]  # O_1, O_3, ...
@@ -293,7 +301,7 @@ def decompose(
         Fs += [F]
         Gs += [G]
 
-    Ds += [torch.linalg.cholesky(Rs)]
+    Ds += [psd_safe_cholesky(Rs)]
     ms += [1]
 
     return torch.tensor(ms), Ds, Fs, Gs
@@ -416,7 +424,7 @@ def mahal_and_det(
         # computes Q_m y - UD^{-1}(P_m y)
         ytilde = ytilde[1::2] - Ux(F, G, newx)
 
-    Ks_even = torch.linalg.cholesky(Rs)
+    Ks_even = psd_safe_cholesky(Rs)
     det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
 
     y = ytilde[::2]
