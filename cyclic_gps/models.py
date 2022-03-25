@@ -129,7 +129,8 @@ class LEGFamily(pl.LightningModule):
     def Lambda_from_params(self) -> None:
         Lambda = torch.zeros(self.obs_dim, self.obs_dim, dtype=self.Lambda_params.dtype)
         Lambda[self.Lambda_idxs] = self.Lambda_params
-        self.register_buffer("Lambda", Lambda)
+        # enforce positive
+        self.register_buffer("Lambda", torch.nn.Softplus(Lambda))
 
     def calc_G(self) -> None:
         """describe G here. it's an important quantity of LEG, needed for cov/precision"""
@@ -180,20 +181,39 @@ class LEGFamily(pl.LightningModule):
         TensorType["num_obs", "rank", "rank"],
         TensorType["num_obs_minus_one", "rank", "rank"],
     ]:
-        """computes the diagonal and offdiag blocks of J precision matrix corresponding to the PEG process"""
+        """Computes the OU process' precision matrix. 
+        Since it is block-tridiagonal, we only need to compute its diagonal and offdiag blocks.
+        Let 
+        r$\begin{align*}
+        d_{i}= & \begin{cases}
+        \infty & i=0\\
+        t_{i+1}-t_{i} & i\in\left\{ 1, \dots, m \right\} \\
+        \infty & i=m+1
+        \end{cases}$
+        The first "time difference" is infinity, the last "time difference" is \infty, and the middle one is a simple time difference.
+        We treat these three cases separately.  """
 
+        # compute time difference, \tau in JMLR, Definition 1
         diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
-        # exponentiate the diffs, TODO: move to Jackson's efficient method?
-        # comes from Definition 1 (diffs are tau in the paper)
 
+        # TODO: move to Jackson's efficient method?
+        # expd:= \exp(-\frac{1}{2} d_{i} G)
         expd = torch.matrix_exp(-0.5 * self.G.unsqueeze(0) * diffs.reshape(-1, 1, 1))
-        expdT = torch.transpose(expd, 1, 2)  # exp(X^T) = (exp X)^T
+        # for matrix exponentials, \exp(X^T) = (\exp (X))^T
+        expdT = torch.transpose(expd, 1, 2)  # \exp(-\frac{1}{2} d_{i} G^{\top})
         eye = torch.eye(self.G.shape[0], dtype=expd.dtype)
 
         # from here on, expdp is called G, and expdT is called G^T in the comments
 
+        # want to compute
         # Ax = b --> x = A^{-1}b, therefore
-        # (I - G^T G) x = G^T --> x = (I - G^T G)^{-1} G^T
+        # (I - expd^T expd) x = expd^T --> x = (I - G^T G)^{-1} G^T
+        """
+        O_{i} & = - (I - e^{-\frac{1}{2}d_{i}G^{T}} e^{-\frac{1}{2}d_{i}G})^{-1} e^{-\frac{1}{2}d_{i}G^{T}}
+        we compute 
+        -O_{i} = (I - e^{-\frac{1}{2}d_{i}G^{T}} e^{-\frac{1}{2}d_{i}G})^{-1} e^{-\frac{1}{2}d_{i}G^{T}}
+        """
+
         imgtginvgt = torch.linalg.solve(eye.unsqueeze(0) - expdT @ expd, expdT)
         imggtinvg = torch.linalg.solve(eye.unsqueeze(0) - expd @ expdT, expd)
 
