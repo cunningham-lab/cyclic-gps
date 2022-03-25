@@ -10,6 +10,7 @@ from typeguard import typechecked
 from cyclic_gps.cyclic_reduction import inverse_blocks, mahal_and_det, decompose, det
 import math
 import pytorch_lightning as pl
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 patch_typeguard()
 
@@ -32,13 +33,17 @@ class LEGFamily(pl.LightningModule):
         self.N_idxs = self.inds_to_tuple(
             torch.tril_indices(row=self.rank, col=self.rank, offset=0)
         )
-        self.N_params = torch.empty(len(self.N_idxs[0]), requires_grad=train)
+        self.N_params = torch.nn.Parameter(
+            data=torch.zeros(len(self.N_idxs[0])), requires_grad=train
+        )
 
         # everything below and including lower off-diagonal in (self.rank, self.rank) mat
         self.R_idxs = self.inds_to_tuple(
             torch.tril_indices(row=self.rank, col=self.rank, offset=-1)
         )
-        self.R_params = torch.empty(len(self.R_idxs[0]), requires_grad=train)
+        self.R_params = torch.nn.Parameter(
+            data=torch.zeros(len(self.R_idxs[0])), requires_grad=train
+        )
 
         # convert to tuple
         # inds = (leg_family.N_idxs[0], leg_family.N_idxs[1])
@@ -49,9 +54,13 @@ class LEGFamily(pl.LightningModule):
         self.Lambda_idxs = self.inds_to_tuple(
             torch.tril_indices(row=self.obs_dim, col=self.obs_dim, offset=0)
         )
-        self.Lambda_params = torch.empty(len(self.Lambda_idxs[0]), requires_grad=train)
+        self.Lambda_params = torch.nn.Parameter(
+            data=torch.zeros(len(self.Lambda_idxs[0])), requires_grad=train
+        )
 
-        self.B = torch.empty((self.obs_dim, self.rank), requires_grad=train)
+        self.B = torch.nn.Parameter(
+            data=torch.zeros((self.obs_dim, self.rank)), requires_grad=train
+        )
 
         #########################################################################
         self.get_initial_guess()
@@ -128,9 +137,10 @@ class LEGFamily(pl.LightningModule):
 
     def Lambda_from_params(self) -> None:
         Lambda = torch.zeros(self.obs_dim, self.obs_dim, dtype=self.Lambda_params.dtype)
-        Lambda[self.Lambda_idxs] = self.Lambda_params
         # enforce positive
-        self.register_buffer("Lambda", torch.nn.Softplus(Lambda))
+        Lambda_params = torch.nn.functional.softplus(self.Lambda_params)
+        Lambda[self.Lambda_idxs] = Lambda_params
+        self.register_buffer("Lambda", Lambda)
 
     def calc_G(self) -> None:
         """describe G here. it's an important quantity of LEG, needed for cov/precision"""
@@ -335,8 +345,11 @@ class LEGFamily(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
-        return optimizer
+        optimizer = Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=1e-3)
+        scheduler = ReduceLROnPlateau(optimizer, "min")
+
+        # optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "NLL"}
 
     def posterior(
         self,
