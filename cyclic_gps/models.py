@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 from typing import List, Dict, Tuple, Optional
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
-from cyclic_gps.cyclic_reduction import inverse_blocks, mahal_and_det, decompose, det
+from cyclic_gps.cyclic_reduction import inverse_blocks, mahal_and_det, decompose, det, solve
 import math
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -259,6 +259,51 @@ class LEGFamily(pl.LightningModule):
         expdT = torch.transpose(expd, 1, 2)  # exp(X^T) = (exp X)^T
         eye = torch.eye(self.G.shape[0], dtype=expd.dtype)
 
+    def compute_posterior_precision(self, ts):
+        LLT = self.calc_Lambda_Lambda_T(
+            self.Lambda
+        )
+        LLT_inv_B = torch.linalg.solve(LLT, self.B)
+        # (obs_dim X obs_dim) * (obs_dim X rank) ->(obs_dim X rank)
+        B_T_LLT_inv_B = self.B.T @ LLT_inv_B
+        # (rank x obs_dim) (obs_dim X rank) -> (rank X rank) trying without einsum
+        Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
+        # note that the "real" \tilde{B} is block-diagional with diagional blocks given by B, and same with the "real" \tilde{\Lambda}
+        # so the "real" matrix B_T_LLT_inv_B we are concerned with has diagional blocks equal to B_T_LLT_inv_B
+        K_Rs = Sigma_inv_Rs + B_T_LLT_inv_B.unsqueeze(0) # add to the diag blocks of the PEG precision
+        K_Os = Sigma_inv_Os 
+
+        return K_Rs, K_Os
+
+    def compute_v(self, xs):
+        LLT = self.calc_Lambda_Lambda_T( #could be moved to input to the function
+            self.Lambda
+        )
+        x_LLT_inv = torch.linalg.solve(
+            LLT, xs.T #effectively broadcasting over blocks of the large tilde lambda matrix
+        ).T
+        v = (
+            x_LLT_inv @ self.B
+        )  # -> (num_obs X obs_dim) X (obs_dim X rank) -> (num_obs X rank)
+        return v
+
+    def compute_insample_posterior(
+        self,
+        ts: TensorType["num_obs"],
+        xs: TensorType["num_obs", "obs_dim"],
+    ):
+        posterior_precision = {}
+        posterior_precision["Rs"], posterior_precision["Os"] = self.compute_posterior_precision(ts)
+        posterior_precision_cr = decompose(**posterior_precision)
+        v = self.compute_v(xs)
+        posterior_mean = solve(posterior_precision_cr, v) 
+        posterior_cov = {}
+        #Question: is posterior covariance tridiagional or close?
+        posterior_cov["Rs"], posterior_cov["Os"] = inverse_blocks(
+            posterior_precision_cr
+        )
+        return posterior_mean, posterior_cov
+
     @typechecked
     def log_likelihood(
         self,
@@ -351,50 +396,54 @@ class LEGFamily(pl.LightningModule):
         # optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
         return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "NLL"}
 
-    def posterior(
-        self,
-        ts: TensorType["num_obs"],
-        xs: TensorType["num_obs", "obs_dim"],
-    ):
-        """
-        Cov
-        1. compute Lambda Lambda^{\top} (obs_dim X obs_dim)
-        2. make it into the big blocked version \tilde{\Lambda}
-        3. multiply by \tilde{B} on right and \tilde{B}^{\top} on left
-        4. compute PEG precision
-        5. Add diags and off-diags
-        6. decompose with CR
-        7. invert
+    # def insample_posterior(
+    #     self,
+    #     ts: TensorType["num_obs"],
+    #     xs: TensorType["num_obs", "obs_dim"],
+    # ):
+    #     """
+    #     Cov
+    #     1. compute Lambda Lambda^{\top} (obs_dim X obs_dim)
+    #     2. make it into the big blocked version \tilde{\Lambda}
+    #     3. multiply by \tilde{B} on right and \tilde{B}^{\top} on left
+    #     4. compute PEG precision
+    #     5. Add diags and off-diags
+    #     6. decompose with CR
+    #     7. invert
 
-        """
-        # get parameters
-        self.register_model_matrices_from_params()
-        # compute Lambda Lambda^{\top}
-        LambdaLambdaTop = self.calc_Lambda_Lambda_T(self.Lambda)
-        # instead of explicitly inverting and computing (\Lambda\Lambda^{\top})^{-1} B:
-        LambdaLambdaTop_inv_B = torch.linalg.solve(LambdaLambdaTop, self.B)
-        BTop_LambdaLambdaTop_inv_B = self.B.T @ LambdaLambdaTop_inv_B
-        # we have a (rank, rank) object above. we should add it to every diagonal block of \Sigma^{-1}
-        Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
+    #     """
+    #     # get parameters
+    #     self.register_model_matrices_from_params()
+    #     # compute Lambda Lambda^{\top}
+    #     LambdaLambdaTop = self.calc_Lambda_Lambda_T(self.Lambda)
+    #     # instead of explicitly inverting and computing (\Lambda\Lambda^{\top})^{-1} B:
+    #     LambdaLambdaTop_inv_B = torch.linalg.solve(LambdaLambdaTop, self.B)
+    #     BTop_LambdaLambdaTop_inv_B = self.B.T @ LambdaLambdaTop_inv_B
+    #     # we have a (rank, rank) object above. we should add it to every diagonal block of \Sigma^{-1}
+    #     Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
 
-        posterior_precision = {}
-        posterior_precision["diag_blocks"] = Sigma_inv_Rs + BTop_LambdaLambdaTop_inv_B
-        posterior_precision["off_diag_blocks"] = Sigma_inv_Os
+    #     posterior_precision = {}
+    #     posterior_precision["Rs"] = Sigma_inv_Rs + BTop_LambdaLambdaTop_inv_B
+    #     posterior_precision["Os"] = Sigma_inv_Os
 
-        posterior_precision_cr = decompose(**posterior_precision)
-        # invert to obtain posterior covariance
-        posterior_cov = {}
-        posterior_cov["diag_blocks"], posterior_cov["off_diag_blocks"] = inverse_blocks(
-            posterior_precision_cr
-        )
+    #     posterior_precision_cr = decompose(**posterior_precision)
+    #     # invert to obtain posterior covariance
+    #     posterior_cov = {}
+    #     posterior_cov["Rs"], posterior_cov["Os"] = inverse_blocks(
+    #         posterior_precision_cr
+    #     )
 
-        # compute the mean
-        BTop_LambdaLambdaTop_inv = LambdaLambdaTop_inv_B.T
-        # use symetry of LambdaLambdaTop_inv above
-        posterior_mean = BTop_LambdaLambdaTop_inv @ xs.T
-        # (rank X num_obs) X (num_obs X obs_dim) X (obs_dim X num_obs) -> (rank X num_obs)
-        # transpose to get (num_obs X rank)
-        return posterior_mean.T, posterior_cov, posterior_precision
+    #     # compute the mean
+    #     BTop_LambdaLambdaTop_inv = LambdaLambdaTop_inv_B.T
+    #     # use symetry of LambdaLambdaTop_inv above
+    #     posterior_mean = BTop_LambdaLambdaTop_inv @ xs.T
+    #     # (rank X num_obs) X (num_obs X obs_dim) X (obs_dim X num_obs) -> (rank X num_obs)
+    #     # transpose to get (num_obs X rank)
+    #     return posterior_mean.T, posterior_cov, posterior_precision
+
+    #def predictive_posterior():
+
+    # def make_predictions():
 
     def gradient_log_likelihood(self):
         raise NotImplementedError

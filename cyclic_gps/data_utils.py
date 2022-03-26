@@ -41,7 +41,7 @@ def threshold_timesteps(
 
 
 @typechecked
-class time_series_dataloader(Dataset):
+class time_series_dataset(Dataset):
     def __init__(
         self,
         ts: TensorType["batch", "num_observations"],
