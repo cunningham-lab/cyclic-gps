@@ -23,11 +23,13 @@ class LEGFamily(pl.LightningModule):
     x(t) \sim \mathcal{N}(Bz(t), \Lambda \Lambda^{\top})
     """
 
-    def __init__(self, rank: int, obs_dim: int, train: bool = False) -> None:
+    def __init__(self, rank: int, obs_dim: int, process_noise_level: float = 1.0, length_scale: float = 0.2, train: bool = False) -> None:
         # TODO: change n -> obs dim ?
         super().__init__()
         self.rank = rank
         self.obs_dim = obs_dim
+        self.process_noise_level = process_noise_level
+        self.length_scale = length_scale
 
         # everything below and including diagonal in (self.rank, self.rank) mat
         self.N_idxs = self.inds_to_tuple(
@@ -90,14 +92,14 @@ class LEGFamily(pl.LightningModule):
 
     def set_initial_N(self) -> None:
         """modify the initial data of self.N_params"""
-        I = torch.eye(self.rank)
+        I = torch.eye(self.rank) * self.process_noise_level
         # Jackson had the below as torch.linalg.cholesky(N@N.T) but Cholesky of an identity is the identity. https://github.com/jacksonloper/leg-gps/blob/c160f13440d67e1041b5b13cdab9dab253569ee7/leggps/training.py#L189
         N = I @ I.T
         self.N_params.data = N[self.N_idxs]
 
     def set_initial_R(self) -> None:
         """modify the initial data of self.N_params"""
-        R = torch.randn((self.rank, self.rank)) * 0.2
+        R = torch.randn((self.rank, self.rank)) * self.length_scale
         R = R - R.T  # makes R anti-symetric
         # Jackson had it in two steps depending on whether R is provided or not, but I decided to simplify and get an identical result (hope ot not run into over/underflow issues). see https://github.com/jacksonloper/leg-gps/blob/c160f13440d67e1041b5b13cdab9dab253569ee7/leggps/training.py#L175
         self.R_params.data = R[self.R_idxs]
@@ -442,6 +444,9 @@ class LEGFamily(pl.LightningModule):
     #     return posterior_mean.T, posterior_cov, posterior_precision
 
     #def predictive_posterior():
+
+
+
 
     # def make_predictions():
 
