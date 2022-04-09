@@ -1,6 +1,6 @@
 # from matplotlib.pyplot import axis
 import torch as torch
-from torch.optim import Adam
+from torch.optim import Adam, LBFGS
 import pytorch_lightning as pl
 
 # import numpy as np
@@ -8,6 +8,7 @@ from typing import List, Dict, Tuple, Optional
 from torchtyping import TensorType, patch_typeguard
 from typeguard import typechecked
 from cyclic_gps.cyclic_reduction import inverse_blocks, mahal_and_det, decompose, det, solve
+from cyclic_gps.model_utils import compute_eG, build_2x2_block, build_3x3_block, gaussian_stitch
 import math
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -23,20 +24,22 @@ class LEGFamily(pl.LightningModule):
     x(t) \sim \mathcal{N}(Bz(t), \Lambda \Lambda^{\top})
     """
 
-    def __init__(self, rank: int, obs_dim: int, process_noise_level: float = 1.0, length_scale: float = 0.2, train: bool = False) -> None:
+    def __init__(self, rank: int, obs_dim: int, prior_process_noise_level: float = 1.0, prior_length_scale: float = 0.2, train: bool = False, optimizer: str = "ADAM", data_type=torch.float32) -> None:
         # TODO: change n -> obs dim ?
         super().__init__()
         self.rank = rank
         self.obs_dim = obs_dim
-        self.process_noise_level = process_noise_level
-        self.length_scale = length_scale
+        self.prior_process_noise_level = prior_process_noise_level
+        self.prior_length_scale = prior_length_scale
+        self.optimizer = optimizer
+        self.data_type = data_type
 
         # everything below and including diagonal in (self.rank, self.rank) mat
         self.N_idxs = self.inds_to_tuple(
             torch.tril_indices(row=self.rank, col=self.rank, offset=0)
         )
         self.N_params = torch.nn.Parameter(
-            data=torch.zeros(len(self.N_idxs[0])), requires_grad=train
+            data=torch.zeros(len(self.N_idxs[0]), dtype=data_type), requires_grad=train
         )
 
         # everything below and including lower off-diagonal in (self.rank, self.rank) mat
@@ -44,7 +47,7 @@ class LEGFamily(pl.LightningModule):
             torch.tril_indices(row=self.rank, col=self.rank, offset=-1)
         )
         self.R_params = torch.nn.Parameter(
-            data=torch.zeros(len(self.R_idxs[0])), requires_grad=train
+            data=torch.zeros(len(self.R_idxs[0]), dtype=data_type), requires_grad=train
         )
 
         # convert to tuple
@@ -57,20 +60,20 @@ class LEGFamily(pl.LightningModule):
             torch.tril_indices(row=self.obs_dim, col=self.obs_dim, offset=0)
         )
         self.Lambda_params = torch.nn.Parameter(
-            data=torch.zeros(len(self.Lambda_idxs[0])), requires_grad=train
+            data=torch.zeros(len(self.Lambda_idxs[0]), dtype=data_type), requires_grad=train
         )
 
         self.B = torch.nn.Parameter(
-            data=torch.zeros((self.obs_dim, self.rank)), requires_grad=train
+            data=torch.zeros((self.obs_dim, self.rank), dtype=data_type), requires_grad=train
         )
 
         #########################################################################
+    
         self.get_initial_guess()
 
         self.register_model_matrices_from_params()
 
         # self.peg_precision = compute_PEG_precision()
-        # self.
 
     @staticmethod
     def inds_to_tuple(
@@ -92,26 +95,27 @@ class LEGFamily(pl.LightningModule):
 
     def set_initial_N(self) -> None:
         """modify the initial data of self.N_params"""
-        I = torch.eye(self.rank) * self.process_noise_level
+        N = torch.eye(self.rank, dtype=self.data_type) * self.prior_process_noise_level
         # Jackson had the below as torch.linalg.cholesky(N@N.T) but Cholesky of an identity is the identity. https://github.com/jacksonloper/leg-gps/blob/c160f13440d67e1041b5b13cdab9dab253569ee7/leggps/training.py#L189
-        N = I @ I.T
+        N = torch.linalg.cholesky(N @ N.T)
         self.N_params.data = N[self.N_idxs]
 
     def set_initial_R(self) -> None:
         """modify the initial data of self.N_params"""
-        R = torch.randn((self.rank, self.rank)) * self.length_scale
-        R = R - R.T  # makes R anti-symetric
+        R = torch.randn((self.rank, self.rank), dtype=self.data_type)
+        R = .5 * (R - R.T) * self.prior_length_scale  # makes R anti-symetric
+        R = R - R.T #he does this twice for some reason
         # Jackson had it in two steps depending on whether R is provided or not, but I decided to simplify and get an identical result (hope ot not run into over/underflow issues). see https://github.com/jacksonloper/leg-gps/blob/c160f13440d67e1041b5b13cdab9dab253569ee7/leggps/training.py#L175
         self.R_params.data = R[self.R_idxs]
 
     def set_initial_Lambda(self) -> None:
-        Lambda = 0.1 * torch.eye(self.obs_dim)
+        Lambda = 0.1 * torch.eye(self.obs_dim, dtype=self.data_type)
         # Jackson had the below for the case that params are provided. but L = cholesky(LL.T)
-        # Lambda = torch.linalg.cholesky(Lambda @ Lambda.T)
+        Lambda = torch.linalg.cholesky(Lambda @ Lambda.T)
         self.Lambda_params.data = Lambda[self.Lambda_idxs]
 
     def set_initial_B(self) -> None:
-        B = torch.ones((self.obs_dim, self.rank))
+        B = torch.ones((self.obs_dim, self.rank), dtype=self.data_type)
         B_torch = 0.5 * B / torch.sqrt(torch.sum(B**2, dim=1, keepdim=True))
         self.B.data = B_torch  # dense, no special indexing like above
 
@@ -146,7 +150,7 @@ class LEGFamily(pl.LightningModule):
 
     def calc_G(self) -> None:
         """describe G here. it's an important quantity of LEG, needed for cov/precision"""
-        G: TensorType["latent_dim", "latent_dim"] = (
+        G: TensorType["rank", "rank"] = (
             self.N @ self.N.T + self.R - self.R.T
         )
         # add small diag noise
@@ -172,20 +176,6 @@ class LEGFamily(pl.LightningModule):
         # self.B is already computed since it's dense.
         self.calc_G()  # from N and R
 
-    # def distribution(self, inputs, outputs, indices, Sig):
-    #     # note: Sig = LambdaLambdaT, have to call the above function for that.
-    #     # TODO: type assertions
-    #     # get Jd
-    #     J_dblocks, J_offblocks = self.compute_PEG_precision(inputs=inputs)
-
-    #     # get JT (TODO: verify)
-    #     # Sig v = x -> v = Sig^{-1} x, call it "Sig_inv_x"
-    #     Sig_inv_x = torch.transpose(torch.linalg.solve(Sig, inputs.T))  # <-- m x n
-    #     Sig_inv_b = torch.linalg.solve(Sig, self.B)  # <-- n x rank
-    #     # TODO: check how this adds offset?
-    #     offset_adder = torch.einsum("nl,mn->ml", self.B, Sig_inv_x)  # <-- m x rank
-    #     # TODO: continute here.
-
     @typechecked
     def compute_PEG_precision(
         self, ts: TensorType["num_obs"]
@@ -204,7 +194,6 @@ class LEGFamily(pl.LightningModule):
         \end{cases}$
         The first "time difference" is infinity, the last "time difference" is \infty, and the middle one is a simple time difference.
         We treat these three cases separately.  """
-
         # compute time difference, \tau in JMLR, Definition 1
         diffs = ts[1:] - ts[:-1]  # be careful when extending to input_dim>1
 
@@ -294,6 +283,7 @@ class LEGFamily(pl.LightningModule):
         ts: TensorType["num_obs"],
         xs: TensorType["num_obs", "obs_dim"],
     ):
+        #self.register_model_matrices_from_params()
         posterior_precision = {}
         posterior_precision["Rs"], posterior_precision["Os"] = self.compute_posterior_precision(ts)
         posterior_precision_cr = decompose(**posterior_precision)
@@ -310,8 +300,7 @@ class LEGFamily(pl.LightningModule):
     def log_likelihood(
         self,
         ts: TensorType["num_obs"],
-        xs: TensorType["num_obs", "obs_dim"],
-        idxs: Optional[TensorType["num_obs"]] = None,
+        xs: TensorType["num_obs", "obs_dim"]
     ) -> TensorType([]):
         # Notation:
         # v := B^T LLT^{-1} x
@@ -322,7 +311,6 @@ class LEGFamily(pl.LightningModule):
 
         # grab params and put these into matrices accessible as self.Lambda, self.N ...
         self.register_model_matrices_from_params()
-
         LLT = self.calc_Lambda_Lambda_T(
             self.Lambda
         )  # per-measurment observation noise, shape(obs_dim x obs_dim)
@@ -343,7 +331,7 @@ class LEGFamily(pl.LightningModule):
         # could make this more efficient as lambda is triangular?
         # =|\tilde{Lambda}|. take the logdet of each block, and multiply by the number of blocks. equivalent to summing
         LLT_det = (
-            torch.logdet(LLT) * xs.shape[0]
+            torch.logdet(2 * math.pi * LLT) * xs.shape[0]
         )  # "real" shape of LLT is block diagional with num_obs blocks each of size (obs_dim x obs_dim)
 
         # we want the matrix multiplication of B.T @ x_LLT_inv.T = (x_LLT_inv @ B).T
@@ -377,6 +365,8 @@ class LEGFamily(pl.LightningModule):
         # now we have a block-tridiagonal matrix K which we can operate on using cyclic reduction
         K_mahal, K_det = mahal_and_det(Rs=K_Rs, Os=K_Os, x=v)  # giving us two scalars.
         mahal = LLT_mahal - K_mahal
+        #print("LLT mahal: {}".format(LLT_mahal))
+        #print("LLT det: {}, Post det: {}, PEG det: {} ".format(LLT_det, K_det, Sigma_inv_det))
 
         log_det = LLT_det + K_det - Sigma_inv_det  # log rules
 
@@ -384,81 +374,176 @@ class LEGFamily(pl.LightningModule):
 
     def training_step(self, train_batch, batch_idx):
         t, x = train_batch
-        nobs = x.shape[0] * x.shape[1]
+        nobs = x.shape[0] * x.shape[1] * x.shape[2]
         # eliminate the batch dimension of 1
         loss = self.log_likelihood(t.squeeze(0), x.squeeze(0))
         loss = -loss / nobs  # TODO: why divide by n_obs?
         self.log("NLL", loss)
         return loss
 
+    
     def configure_optimizers(self):
-        optimizer = Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=1e-3)
+        if self.optimizer == "ADAM":
+            optimizer = Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=1e-2)
+        elif self.optimizer == "BFGS":
+            optimizer = LBFGS(filter(lambda p: p.requires_grad, self.parameters()), lr=0.1, max_iter=20)
         scheduler = ReduceLROnPlateau(optimizer, "min")
 
         # optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
         return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "NLL"}
 
-    # def insample_posterior(
-    #     self,
-    #     ts: TensorType["num_obs"],
-    #     xs: TensorType["num_obs", "obs_dim"],
-    # ):
-    #     """
-    #     Cov
-    #     1. compute Lambda Lambda^{\top} (obs_dim X obs_dim)
-    #     2. make it into the big blocked version \tilde{\Lambda}
-    #     3. multiply by \tilde{B} on right and \tilde{B}^{\top} on left
-    #     4. compute PEG precision
-    #     5. Add diags and off-diags
-    #     6. decompose with CR
-    #     7. invert
+    def forecast(
+        self, 
+        eG: TensorType["rank", "rank"], 
+        ip_mean: TensorType["rank"],
+        ip_cov: TensorType["rank", "rank"]
+    ):
+        #eG: prior covariance
+        #ip_mean: insample posterior mean
+        #ip_cov: insample posterior covariance (diagional and off diagional blocks of it)
+        nones=(None,)*(len(eG.shape)-2)
+        I = torch.eye(self.rank)[nones]   #.expand_as(eG)
+        joint_mean = torch.zeros(self.rank*2)[nones] #
+        joint_cov = build_2x2_block(I, eG.T, eG, I)
+        return gaussian_stitch(joint_mean, joint_cov, ip_mean, ip_cov)
 
-    #     """
-    #     # get parameters
-    #     self.register_model_matrices_from_params()
-    #     # compute Lambda Lambda^{\top}
-    #     LambdaLambdaTop = self.calc_Lambda_Lambda_T(self.Lambda)
-    #     # instead of explicitly inverting and computing (\Lambda\Lambda^{\top})^{-1} B:
-    #     LambdaLambdaTop_inv_B = torch.linalg.solve(LambdaLambdaTop, self.B)
-    #     BTop_LambdaLambdaTop_inv_B = self.B.T @ LambdaLambdaTop_inv_B
-    #     # we have a (rank, rank) object above. we should add it to every diagonal block of \Sigma^{-1}
-    #     Sigma_inv_Rs, Sigma_inv_Os = self.compute_PEG_precision(ts)
+    def interpolate(
+        eG1: TensorType["rank", "rank"],
+        eG2: TensorType["rank", "rank"],
+        prev_ip_mean: TensorType["rank"],
+        prev_ip_cov_diag: TensorType["rank", "rank"],
+        prev_ip_cov_offdiag,
+        next_ip_mean: TensorType["rank"],
+        next_ip_cov_diag: TensorType["rank", "rank"]
+    ):
+        """
+        p(z_1, z_3|x) = N([prev_ip_mean, next_ip_mean], 
+                        [[prev_ip_cov_diag, ])
 
-    #     posterior_precision = {}
-    #     posterior_precision["Rs"] = Sigma_inv_Rs + BTop_LambdaLambdaTop_inv_B
-    #     posterior_precision["Os"] = Sigma_inv_Os
+        """
+        nones = (None,)*(len(eG1.shape)-2)
+        I = torch.eye(self.rank)[nones]
 
-    #     posterior_precision_cr = decompose(**posterior_precision)
-    #     # invert to obtain posterior covariance
-    #     posterior_cov = {}
-    #     posterior_cov["Rs"], posterior_cov["Os"] = inverse_blocks(
-    #         posterior_precision_cr
-    #     )
+        joint_latent_mean = torch.zeroes(self.rank*3)[nones]
 
-    #     # compute the mean
-    #     BTop_LambdaLambdaTop_inv = LambdaLambdaTop_inv_B.T
-    #     # use symetry of LambdaLambdaTop_inv above
-    #     posterior_mean = BTop_LambdaLambdaTop_inv @ xs.T
-    #     # (rank X num_obs) X (num_obs X obs_dim) X (obs_dim X num_obs) -> (rank X num_obs)
-    #     # transpose to get (num_obs X rank)
-    #     return posterior_mean.T, posterior_cov, posterior_precision
+        eG3 = eG1@eG2 #computes exp{-t_3 - t_1}G
+        joint_latent_cov = build_3x3_block( #Why is different than what Jackson has in his code? It alligns with his notes
+            I, eG1.T, eG3.T,
+            eG1, I, eG2.T,
+            eG3, eG2, I
+        )
+        
+        joint_ip_mean = torch.cat([prev_ip_mean, next_ip_mean], dim=0)
 
-    #def predictive_posterior():
+        joint_ip_cov = build_2x2_block(
+            prev_ip_cov_diag, prev_ip_cov_offdiag.T, #note that the offdiagional blocks of the insample posterior give the cross covariance between one time step and the next timestep, and since this is the lower off diagonal we want the transpose to get the forwards direction
+            prev_ip_cov_offdiag, next_ip_cov_diag
+        )
 
+        return gaussian_stitch(joint_latent_mean, joint_latent_cov, joint_ip_mean, joint_ip_cov)
+   
+    
+    def intercast(
+        self, 
+        ip_mean, 
+        ip_cov, 
+        ts, 
+        target_ts, 
+        thresh=1e-10
+    ):
+        '''
+        ip_mean: (num_obs x rank) insample_posterior_mean
+        ip_cov: (num_obs x rank x rank) insample_posterior_cov
+        ts: (num_obs) time steps correponding to observations
+        target_ts: (num_preds) time steps to make predictions at
+        '''
+        G_val, G_vec = torch.linalg.eig(self.G)
+        G_vec_inv = torch.linalg.inv(G_vec)
+        I = torch.eye(self.rank)
+        assert (target_ts[1:]-target_ts[:-1]>0).all() # make sure target_ts is sorted
+        new_loc_idxs = torch.searchsorted(ts, target_ts)
+        means, variances = [], []
+        for i, idx in enumerate(new_loc_idxs):
+            if idx==0: # forecasting backwards
+                #search sorted will return 0 if the item we are looking for is before the 
+                #first element of target_ts or equal to it, so we need to check for 2nd case
+                if torch.allclose(target_ts[i], ts[0]):
+                    m, v = ip_mean[0], ip_cov["Rs"][0]
+                else:
+                    diff = (ts[0] - target_ts[i])
+                    eG = compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff))[0]
+                    print("eG shape")
+                    print(eG.shape)
+                    eG = eG.T
+                    print(eG.shape)
+                    m, v = self.forecast(eG, ip_mean[0], ip_cov["Rs"][0])
+            
+            elif idx==ts.shape[0]: #forecasting forwards
+                if torch.allclose(target_ts[i], ts[-1]): #last value
+                    m, v = ip_mean[-1], ip_cov["Rs"][-1]
+                else:
+                    diff = (target_ts[i] - ts[-1])
+                    eG = compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff))[0]
+                    m, v = self.forecast(eG, ip_mean[-1], ip_cov["Rs"][-1])
+            else:
+                #interpolating
+                if torch.allclose(target_ts[i], ts[-1]): #checks the case where idx == ts.shape[0] - 1 and we just want the last value exactly
+                    m, v = ip_mean[-1], ip_cov["Rs"][-1]
+                else:
+                    diff1 = target_ts[i] - ts[idx-1] #diff between target and previous train ts
+                    diff2 = ts[idx] - target_ts[i] #diff between next train ts and target
+                    eg1 = compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff1))[0]
+                    eg2= compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff2))[0]
+                    m, v = self.interpolate(
+                        eg1, 
+                        eg2,
+                        ip_mean[idx-1],
+                        ip_cov["Rs"][idx-1],
+                        ip_cov["Os"][idx-1],
+                        ip_mean[idx],
+                        ip_cov["Rs"][idx]
+                    )    
+            means.append(m)
+            variances.append(v)
 
+        return torch.stack(means, dim=0), torch.stack(variances, dim=0)
+    
+    def predictive_posterior(self, ts, xs, target_ts):
+        '''
+        ts: (num_obs) time steps correponding to observations
+        xs : (num_obs x obs_dim) observations
+        target_ts: (num_preds) time steps to make predictions at 
+        
+        Output:
+        - means: (num_preds x rank) E[Z(target_ts[i]) |X] for each i
+        - variance: (num_preds x rank x rank) (I think) Cov(Z(target_ts[i]) |X) for each i
+        '''
+        insample_posterior_mean, insample_posterior_cov = self.compute_insample_posterior(ts, xs)
+        predictive_posterior_means, predicted_posterior_variances = self.intercast(insample_posterior_mean, insample_posterior_cov, ts, target_ts)
+        return predictive_posterior_means, predicted_posterior_variances
 
+    def make_predictions(self, ts, xs, target_ts):
+        '''
+        ts: (num_obs) time steps correponding to observations
+        xs : (num_obs x obs_dim) observations
+        target_ts: (num_preds) time steps to make predictions at 
+        
+        Output:
+        - mean: (num_preds x obs_dim) predicted datapoint for each target_ts
+        - variance: (num_preds x obs_dim x obs_dim) covariance for each predicted datapoint
+        '''
+        #self.register_model_matrices_from_params()
+        self.calc_G()
+        predictive_posterior_means, predicted_posterior_variances = self.predictive_posterior(ts, xs, target_ts)
+        prediction_means = predictive_posterior_means @ self.B.T
+        prediction_covariances = self.B.unsqueeze(0) @ predicted_posterior_variances @ self.B.T.unsqueeze(0)
 
-    # def make_predictions():
+        return prediction_means, prediction_covariances
 
     def gradient_log_likelihood(self):
         raise NotImplementedError
 
-    # we have fit as an class method instead of an external function
-    # def fit(self, ts, xs):
-    #     get_initial_guess() #intializes N, R, B, and Lambda
-    #     fit_model_family(self, ts, xs)
-
-
+   
 # TODO: add implementation for CeleriteFamily
 # class CeleriteFamily(LEGFamily):
 #     def __init__(self, nblocks: int, n: int) -> None:

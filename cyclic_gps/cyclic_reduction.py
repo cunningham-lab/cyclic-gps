@@ -10,6 +10,8 @@ from gpytorch.utils.errors import NotPSDError
 patch_typeguard()
 
 
+JITTER = None #.75
+
 def UU_T(diags, offdiags):
     n = diags.shape[0]
     m = offdiags.shape[0]
@@ -222,7 +224,7 @@ def decompose_step(
     num_dblocks = Rs.shape[0]
     Rs_even = Rs[::2]  # R_0, R_2, ...
 
-    Ks_even = psd_safe_cholesky(Rs_even)  # Cholesky per diag block
+    Ks_even = psd_safe_cholesky(Rs_even, jitter=JITTER)  # Cholesky per diag block
 
     # try:
     #     Ks_even = psd_safe_cholesky(Rs_even)  # Cholesky per diag block
@@ -301,7 +303,8 @@ def decompose(
         Fs += [F]
         Gs += [G]
 
-    Ds += [psd_safe_cholesky(Rs)]
+    #print(torch.mean(Rs))
+    Ds += [psd_safe_cholesky(Rs, jitter=JITTER)]
     ms += [1]
 
     return torch.tensor(ms), Ds, Fs, Gs
@@ -424,7 +427,7 @@ def mahal_and_det(
         # computes Q_m y - UD^{-1}(P_m y)
         ytilde = ytilde[1::2] - Ux(F, G, newx)
 
-    Ks_even = psd_safe_cholesky(Rs)
+    Ks_even = psd_safe_cholesky(Rs, jitter=JITTER)
     det += torch.sum(torch.log(torch.diagonal(Ks_even, dim1=1, dim2=2)))
 
     y = ytilde[::2]
