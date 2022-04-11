@@ -290,7 +290,7 @@ class LEGFamily(pl.LightningModule):
         v = self.compute_v(xs)
         posterior_mean = solve(posterior_precision_cr, v) 
         posterior_cov = {}
-        #Question: is posterior covariance tridiagional or close?
+        #Note that posterior covariance is not tridiagional, we just only care about diagional blocks
         posterior_cov["Rs"], posterior_cov["Os"] = inverse_blocks(
             posterior_precision_cr
         )
@@ -408,11 +408,12 @@ class LEGFamily(pl.LightningModule):
         return gaussian_stitch(joint_mean, joint_cov, ip_mean, ip_cov)
 
     def interpolate(
+        self,
         eG1: TensorType["rank", "rank"],
         eG2: TensorType["rank", "rank"],
         prev_ip_mean: TensorType["rank"],
         prev_ip_cov_diag: TensorType["rank", "rank"],
-        prev_ip_cov_offdiag,
+        prev_ip_cov_offdiag: TensorType["rank", "rank"],
         next_ip_mean: TensorType["rank"],
         next_ip_cov_diag: TensorType["rank", "rank"]
     ):
@@ -424,7 +425,7 @@ class LEGFamily(pl.LightningModule):
         nones = (None,)*(len(eG1.shape)-2)
         I = torch.eye(self.rank)[nones]
 
-        joint_latent_mean = torch.zeroes(self.rank*3)[nones]
+        joint_latent_mean = torch.zeros(self.rank*3)[nones]
 
         eG3 = eG1@eG2 #computes exp{-t_3 - t_1}G
         joint_latent_cov = build_3x3_block( #Why is different than what Jackson has in his code? It alligns with his notes
@@ -472,10 +473,10 @@ class LEGFamily(pl.LightningModule):
                 else:
                     diff = (ts[0] - target_ts[i])
                     eG = compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff))[0]
-                    print("eG shape")
-                    print(eG.shape)
+                    #print("eG shape")
+                    #print(eG.shape)
                     eG = eG.T
-                    print(eG.shape)
+                    #print(eG.shape)
                     m, v = self.forecast(eG, ip_mean[0], ip_cov["Rs"][0])
             
             elif idx==ts.shape[0]: #forecasting forwards

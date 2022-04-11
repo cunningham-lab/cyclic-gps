@@ -42,7 +42,13 @@ def build_2x2_block(a, b, c, d):
     return abcd
 
 def build_3x3_block(a,b,c,d,e,f,g,h,i):
-    dsfjklj
+    abc = torch.cat([a,b,c],axis=-1)
+    cde = torch.cat([d,e,f],axis=-1)
+    fgh = torch.cat([g,h,i],axis=-1)
+
+    rez = torch.cat([abc,cde,fgh],axis=-2)
+
+    return rez
     
 
 

@@ -18,9 +18,12 @@ leg_model = LEGFamily(rank=RANK, obs_dim=OBS_DIM, train=False, prior_process_noi
 kf = init_kalman_filter(leg_model, TIME_STEP, use_approximation=False)
 
 START_N = 200
-END_N = 4000
-STEP = 200
-ns = range(START_N, END_N, STEP)
+END_N = 400000
+STEP = 20000
+#ns = range(START_N, END_N, STEP)
+pows = range(1, 7)
+ns = [10 ** i for i in pows]
+print(ns)
 leg_post_times = np.empty(len(ns))
 kf_post_times = np.empty(len(ns))
 leg_ll_times = np.empty(len(ns))
@@ -29,6 +32,7 @@ i = 0
 total_percent_post_diff = 0
 total_percent_ll_diff = 0
 for n in ns:
+    print(n)
     ts = torch.arange(start=0, end=TIME_STEP * n, step=TIME_STEP).float()
     zs = generate_states_from_kalman(kf, ts)
     xs_np = zs @ kf.H.T + np.random.multivariate_normal(mean=np.zeros(shape=(2)), cov=leg_model.calc_Lambda_Lambda_T(leg_model.Lambda).numpy(), size=n) 
@@ -63,11 +67,15 @@ axs1.scatter(ns, kf_post_times, label="kf posterior times")
 axs1.scatter(ns, leg_post_times, label="leg posterior times")
 axs1.set_xlabel("num datapoints")
 axs1.set_ylabel("seconds")
+axs1.set_xscale("log")
+axs1.set_yscale("log")
 axs1.legend()
 axs2.scatter(ns, kf_ll_times, label="kf log likelihood times")
 axs2.scatter(ns, leg_ll_times, label="leg log likelihood times")
 axs2.set_xlabel("num datapoints")
 axs2.set_ylabel("seconds")
+axs2.set_xscale("log")
+axs2.set_yscale("log")
 axs2.legend()
 plt.show()
 

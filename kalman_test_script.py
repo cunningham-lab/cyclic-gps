@@ -11,9 +11,7 @@ import matplotlib.pyplot as plt
 from cyclic_gps.kalman import init_kalman_filter, get_state_estimates
 import filterpy
 from filterpy.kalman import KalmanFilter
-import numpy.random as npr
 
-print("OK")
 
 num_datapoints = 100
 sample1_ts = torch.empty(num_datapoints)
@@ -40,21 +38,27 @@ assert torch.allclose(example[0], sample1_ts.unsqueeze(0)) # we're getting our d
 dl = DataLoader(dataset=dataset, batch_size=1)
 
 RANK = 5
-MAX_EPOCHS = 100 #for testing purposes
+MAX_EPOCHS = 1000 #for testing purposes
 LEG_model = LEGFamily(rank=RANK, obs_dim=vals.shape[1], train=True)
 
-logger = pl.loggers.TensorBoardLogger("tb_logs", name="first_pass_model")
-trainer = pl.Trainer(max_epochs=MAX_EPOCHS, logger=logger, log_every_n_steps=1)
-trainer.fit(model=LEG_model, train_dataloaders=dl)
+# logger = pl.loggers.TensorBoardLogger("tb_logs", name="first_pass_model")
+# trainer = pl.Trainer(max_epochs=MAX_EPOCHS, logger=logger, log_every_n_steps=1)
+# trainer.fit(model=LEG_model, train_dataloaders=dl)
 
 TIME_STEP = 1 #time step for kalman predictions
 kf = init_kalman_filter(LEG_model, TIME_STEP)
 kf_state_ests = torch.from_numpy(get_state_estimates(kf, vals.numpy())).float().squeeze(-1)
 leg_state_ests, _ = LEG_model.compute_insample_posterior(ts=sample1_ts, xs=vals)
-print(kf_state_ests[0], leg_state_ests[0])
 print(kf_state_ests.shape, leg_state_ests.shape)
-print(kf_state_ests.dtype, leg_state_ests.dtype)
-assert torch.allclose(kf_state_ests, leg_state_ests)
+print(kf_state_ests[0], leg_state_ests[0])
+reconstructed_data_kf =  kf_state_ests @ LEG_model.B.T
+reconstructed_data_leg = leg_state_ests @ LEG_model.B.T
+print("KF LOSS:")
+print(torch.norm(reconstructed_data_kf - vals))
+print("LEG LOSS:")
+print(torch.norm(reconstructed_data_leg - vals))
+
+#assert torch.allclose(kf_state_ests, leg_state_ests)
 
 
 
