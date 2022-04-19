@@ -24,8 +24,7 @@ class LEGFamily(pl.LightningModule):
     x(t) \sim \mathcal{N}(Bz(t), \Lambda \Lambda^{\top})
     """
 
-    def __init__(self, rank: int, obs_dim: int, prior_process_noise_level: float = 1.0, prior_length_scale: float = 0.2, train: bool = False, optimizer: str = "ADAM", data_type=torch.float32) -> None:
-        # TODO: change n -> obs dim ?
+    def __init__(self, rank: int, obs_dim: int, prior_process_noise_level: float = 1.0, prior_length_scale: float = 0.2, train: bool = False, optimizer: str = "ADAM", data_type=torch.float32, lr=1e-2) -> None:
         super().__init__()
         self.rank = rank
         self.obs_dim = obs_dim
@@ -33,6 +32,7 @@ class LEGFamily(pl.LightningModule):
         self.prior_length_scale = prior_length_scale
         self.optimizer = optimizer
         self.data_type = data_type
+        self.lr = lr
 
         # everything below and including diagonal in (self.rank, self.rank) mat
         self.N_idxs = self.inds_to_tuple(
@@ -70,10 +70,7 @@ class LEGFamily(pl.LightningModule):
         #########################################################################
     
         self.get_initial_guess()
-
         self.register_model_matrices_from_params()
-
-        # self.peg_precision = compute_PEG_precision()
 
     @staticmethod
     def inds_to_tuple(
@@ -96,6 +93,7 @@ class LEGFamily(pl.LightningModule):
     def set_initial_N(self) -> None:
         """modify the initial data of self.N_params"""
         N = torch.eye(self.rank, dtype=self.data_type) * self.prior_process_noise_level
+        #N = torch.abs(torch.randn(self.rank,self.rank)) * 0.4
         # Jackson had the below as torch.linalg.cholesky(N@N.T) but Cholesky of an identity is the identity. https://github.com/jacksonloper/leg-gps/blob/c160f13440d67e1041b5b13cdab9dab253569ee7/leggps/training.py#L189
         N = torch.linalg.cholesky(N @ N.T)
         self.N_params.data = N[self.N_idxs]
@@ -103,9 +101,12 @@ class LEGFamily(pl.LightningModule):
     def set_initial_R(self) -> None:
         """modify the initial data of self.N_params"""
         R = torch.randn((self.rank, self.rank), dtype=self.data_type)
-        R = .5 * (R - R.T) * self.prior_length_scale  # makes R anti-symetric
+        #R[:2] = 0
+        #R[:,:2] = 0
+        #DANGER: HARDCODED FOR NOW
+        #R[:2,:2]= torch.tensor([0,1,-1,0]).reshape(2,2)*6
+        #R = .5 * (R - R.T) * self.prior_length_scale  # makes R anti-symetric
         R = R - R.T #he does this twice for some reason
-        # Jackson had it in two steps depending on whether R is provided or not, but I decided to simplify and get an identical result (hope ot not run into over/underflow issues). see https://github.com/jacksonloper/leg-gps/blob/c160f13440d67e1041b5b13cdab9dab253569ee7/leggps/training.py#L175
         self.R_params.data = R[self.R_idxs]
 
     def set_initial_Lambda(self) -> None:
@@ -360,16 +361,14 @@ class LEGFamily(pl.LightningModule):
         # so the "real" matrix B_T_LLT_inv_B we are concerned with has diagional blocks equal to B_T_LLT_inv_B
         K_Rs = Sigma_inv_Rs + B_T_LLT_inv_B.unsqueeze(0)
         # add to the diag blocks of the PEG precision
-        K_Os = Sigma_inv_Os  # don't touch off-diags.
+        K_Os = Sigma_inv_Os
 
         # now we have a block-tridiagonal matrix K which we can operate on using cyclic reduction
         K_mahal, K_det = mahal_and_det(Rs=K_Rs, Os=K_Os, x=v)  # giving us two scalars.
         mahal = LLT_mahal - K_mahal
-        #print("LLT mahal: {}".format(LLT_mahal))
-        #print("LLT det: {}, Post det: {}, PEG det: {} ".format(LLT_det, K_det, Sigma_inv_det))
+
 
         log_det = LLT_det + K_det - Sigma_inv_det  # log rules
-
         return -0.5 * (mahal + log_det)
 
     def training_step(self, train_batch, batch_idx):
@@ -384,9 +383,9 @@ class LEGFamily(pl.LightningModule):
     
     def configure_optimizers(self):
         if self.optimizer == "ADAM":
-            optimizer = Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=1e-2)
+            optimizer = Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
         elif self.optimizer == "BFGS":
-            optimizer = LBFGS(filter(lambda p: p.requires_grad, self.parameters()), lr=0.1, max_iter=20)
+            optimizer = LBFGS(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr, max_iter=20)
         scheduler = ReduceLROnPlateau(optimizer, "min")
 
         # optimizer = Adam([self.N_params, self.R_params, self.Lambda_params, self.B])
@@ -428,11 +427,16 @@ class LEGFamily(pl.LightningModule):
         joint_latent_mean = torch.zeros(self.rank*3)[nones]
 
         eG3 = eG1@eG2 #computes exp{-t_3 - t_1}G
-        joint_latent_cov = build_3x3_block( #Why is different than what Jackson has in his code? It alligns with his notes
-            I, eG1.T, eG3.T,
-            eG1, I, eG2.T,
-            eG3, eG2, I
+        joint_latent_cov = build_3x3_block(
+            I, eG3.T, eG1.T,
+            eG3, I, eG2,
+            eG1, eG2.T, I
         )
+        # joint_latent_cov = build_3x3_block( #Why is different than what Jackson has in his code? It alligns with his notes
+        #     I, eG1.T, eG3.T,
+        #     eG1, I, eG2.T,
+        #     eG3, eG2, I
+        # )
         
         joint_ip_mean = torch.cat([prev_ip_mean, next_ip_mean], dim=0)
 
@@ -440,7 +444,10 @@ class LEGFamily(pl.LightningModule):
             prev_ip_cov_diag, prev_ip_cov_offdiag.T, #note that the offdiagional blocks of the insample posterior give the cross covariance between one time step and the next timestep, and since this is the lower off diagonal we want the transpose to get the forwards direction
             prev_ip_cov_offdiag, next_ip_cov_diag
         )
-
+        # print("joint_latent_mean: {}".format(joint_latent_mean))
+        # print("joint_latent_cov: {}".format(joint_latent_cov))
+        # print("joint_ip_mean: {}".format(joint_ip_mean))
+        # print("joint_ip_cov: {}".format(joint_ip_cov))
         return gaussian_stitch(joint_latent_mean, joint_latent_cov, joint_ip_mean, joint_ip_cov)
    
     
@@ -473,10 +480,7 @@ class LEGFamily(pl.LightningModule):
                 else:
                     diff = (ts[0] - target_ts[i])
                     eG = compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff))[0]
-                    #print("eG shape")
-                    #print(eG.shape)
                     eG = eG.T
-                    #print(eG.shape)
                     m, v = self.forecast(eG, ip_mean[0], ip_cov["Rs"][0])
             
             elif idx==ts.shape[0]: #forecasting forwards
@@ -496,13 +500,13 @@ class LEGFamily(pl.LightningModule):
                     eg1 = compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff1))[0]
                     eg2= compute_eG(G_val, G_vec, G_vec_inv, torch.tensor(diff2))[0]
                     m, v = self.interpolate(
-                        eg1, 
-                        eg2,
-                        ip_mean[idx-1],
-                        ip_cov["Rs"][idx-1],
-                        ip_cov["Os"][idx-1],
-                        ip_mean[idx],
-                        ip_cov["Rs"][idx]
+                        eG1=eg1, 
+                        eG2=eg2,
+                        prev_ip_mean=ip_mean[idx-1],
+                        prev_ip_cov_diag=ip_cov["Rs"][idx-1],
+                        prev_ip_cov_offdiag=ip_cov["Os"][idx-1],
+                        next_ip_mean=ip_mean[idx],
+                        next_ip_cov_diag=ip_cov["Rs"][idx]
                     )    
             means.append(m)
             variances.append(v)

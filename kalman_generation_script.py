@@ -19,7 +19,8 @@ for i in range(3):
         leg_model = LEGFamily(rank=RANK, obs_dim=OBS_DIM, train=False, prior_process_noise_level=0.5 * (i + 1), prior_length_scale=j*4)
         kf = init_kalman_filter(leg_model, TIME_STEP, use_approximation=False)
         zs = generate_states_from_kalman(kf, ts)
-        xs = zs @ kf.H.T + np.random.multivariate_normal(mean=np.zeros(shape=(2)), cov=leg_model.calc_Lambda_Lambda_T(leg_model.Lambda).numpy(), size=num_datapoints) 
+        xs = zs @ kf.H.T + np.random.multivariate_normal(mean=np.zeros(shape=(2)), cov=leg_model.calc_Lambda_Lambda_T(leg_model.Lambda).numpy(), size=num_datapoints)
+        kf = init_kalman_filter(leg_model, TIME_STEP, use_approximation=False) 
         kf_state_ests = get_state_estimates(kf, xs).squeeze(-1)
         leg_state_ests, _ = leg_model.compute_insample_posterior(ts=torch.from_numpy(ts).float(), xs=torch.from_numpy(xs).float())
 

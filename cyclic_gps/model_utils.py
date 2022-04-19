@@ -1,4 +1,13 @@
 import torch
+import math
+
+#utility function external to the LEG model class
+def compute_G(N, R):
+  """describe G here. it's an important quantity of LEG, needed for cov/precision"""
+  G = N @ N.T + R - R.T
+  # add small diag noise
+  G += torch.eye(N.shape[0], dtype=N.dtype) * (1e-5)
+  return G
 
 def compute_eG(G_val, G_vec, G_vec_inv, diffs):
         '''
@@ -71,14 +80,17 @@ def gaussian_stitch(joint_mean, joint_cov, marginal_mean, marginal_cov):
     '''
     # print("joint_cov:")
     # print(joint_cov.shape)
-    n = joint_mean.shape[-1]
-    m = marginal_mean.shape[-1]
+    n = joint_cov.shape[-1]
+    m = marginal_cov.shape[-1]
     slx=slice(0,m)
     sly=slice(m,None)
     
     #mean_transformer = Cov[p(x,y)] @ (Cov[p(x)])^-1 aka  + C^TA^{-1}
     
+    # print("joint_cov_y_x: {}".format(joint_cov[...,sly,slx]))
+    # print("joint_cov_x_x: {}".format(joint_cov[...,slx,slx]))
     mean_transformer = joint_cov[...,sly,slx] @  torch.linalg.inv(joint_cov[...,slx,slx])
+    #print("mean_transformer: {}".format(mean_transformer))
 
     #E[q(y)] = mean_y + mean_transformer @ mean_x note it is very close to E[p(y|x)] = b + C^TA^{-1}(x - a)
     mean = joint_mean[...,sly] + (mean_transformer @ marginal_mean[...,None])
@@ -93,6 +105,41 @@ def gaussian_stitch(joint_mean, joint_cov, marginal_mean, marginal_cov):
     # print("covariance shape:")
     # print(cov.shape)
     return mean, cov
+
+
+def compute_prior_covariance(ts, G):
+    n = len(ts)
+    l = G.shape[0]
+    G_t = G.T
+    G = G.unsqueeze(0)
+    G_t = G_t.unsqueeze(0)
+    C = torch.empty(size=(n * l, n * l), dtype=G.dtype)
+    for i in range(n):
+        for j in range(n):
+            if i > j:
+                diff = ts[i] - ts[j]
+                expd = torch.matrix_exp(-0.5 * G * diff)
+            elif j > i:
+                diff = ts[j] - ts[i]
+                expd = torch.matrix_exp(-0.5 * G_t * diff)
+            else:
+                expd = torch.eye(n=l)
+            C[i*l: i*l+l, j*l: j*l+l] = expd
+    return C
+
+    
+def compute_log_marginal_likelihood(N, R, B, Lambda, ts, xs):
+    n = len(xs)
+    G = compute_G(N, R)
+    Bs = [B for _ in range(n)]
+    B_tilde = torch.block_diag(*Bs) #could maybe use expand
+    Lambdas = [Lambda for _ in range(n)]
+    Lambda_tilde = torch.block_diag(*Lambdas)
+    Sigma = compute_prior_covariance(ts=ts, G=G)
+    post_cov = B_tilde @ Sigma @ B_tilde.T + Lambda_tilde
+    mahal = xs.reshape(1, -1) @ torch.linalg.inv(post_cov) @ xs.reshape(-1, 1)
+    det = torch.log(torch.det(2*math.pi*post_cov))
+    return (-.5 * mahal) + (-.5 * det)
     
 
 

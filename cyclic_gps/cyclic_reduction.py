@@ -303,7 +303,6 @@ def decompose(
         Fs += [F]
         Gs += [G]
 
-    #print(torch.mean(Rs))
     Ds += [psd_safe_cholesky(Rs, jitter=JITTER)]
     ms += [1]
 

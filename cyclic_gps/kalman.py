@@ -51,13 +51,19 @@ def get_state_estimates(kf, data):
     #     state_estimates[i] = kf.x
     return state_estimates_smoothed
 
-def log_marginal_likelihood(kf, data):
+def kf_log_marginal_likelihood(kf, data):
     ll = 0
     for i in range(data.shape[0]):
         kf.predict()
         kf.update(data[i])
         ll += kf.log_likelihood
     return ll
+
+def zero_filter(kf, rank):
+    kf.x_0 = np.zeros((rank, 1))
+    kf.P = np.eye(rank)
+    return kf
+
 
 
 
