@@ -86,20 +86,20 @@ def test_compute_PEG_precision():
     assert out[1].shape == (num_obs - 1, rank, rank)
 
 
-def test_posterior():
-    rank = 3
-    num_obs = 100
-    leg_family = LEGFamily(rank=rank, obs_dim=2)
-    posterior_mean, posterior_cov, posterior_precision = leg_family.posterior(
-        torch.linspace(start=0.0, end=10.0, steps=num_obs)
-    )
+# def test_posterior():
+#     rank = 3
+#     num_obs = 100
+#     leg_family = LEGFamily(rank=rank, obs_dim=2)
+#     posterior_mean, posterior_cov, posterior_precision = leg_family.posterior(
+#         torch.linspace(start=0.0, end=10.0, steps=num_obs)
+#     )
 
-    # assert shapes
-    assert posterior_precision["diag_blocks"].shape == (num_obs, rank, rank)
-    assert posterior_precision["off_diag_blocks"].shape == (num_obs - 1, rank, rank)
-    assert posterior_mean.shape == (num_obs, rank)
-    assert posterior_cov.shape == (num_obs, rank, rank)
+#     # assert shapes
+#     assert posterior_precision["diag_blocks"].shape == (num_obs, rank, rank)
+#     assert posterior_precision["off_diag_blocks"].shape == (num_obs - 1, rank, rank)
+#     assert posterior_mean.shape == (num_obs, rank)
+#     assert posterior_cov.shape == (num_obs, rank, rank)
 
-    # assert that the precision, posterior, are positive semi-definite
+#     # assert that the precision, posterior, are positive semi-definite
 
-    # make_up_data from that process and do posterior inference. can you fit?
+#     # make_up_data from that process and do posterior inference. can you fit?

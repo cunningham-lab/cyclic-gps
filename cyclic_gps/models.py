@@ -106,7 +106,7 @@ class LEGFamily(pl.LightningModule):
         #DANGER: HARDCODED FOR NOW
         #R[:2,:2]= torch.tensor([0,1,-1,0]).reshape(2,2)*6
         #R = .5 * (R - R.T) * self.prior_length_scale  # makes R anti-symetric
-        R = R - R.T #he does this twice for some reason
+        R = (R - R.T) * self.prior_length_scale  #he does this twice for some reason
         self.R_params.data = R[self.R_idxs]
 
     def set_initial_Lambda(self) -> None:

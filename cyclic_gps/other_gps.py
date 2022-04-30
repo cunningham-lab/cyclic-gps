@@ -3,11 +3,12 @@ from torch.optim import Adam
 import gpytorch
 
 class SpectralMixtureGPModel(gpytorch.models.ExactGP):
-    def __init__(self, train_x, train_y, likelihood, num_mixtures):
+    def __init__(self, train_x, train_y, likelihood, num_mixtures, lr):
         super(SpectralMixtureGPModel, self).__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = gpytorch.kernels.SpectralMixtureKernel(num_mixtures=num_mixtures)
         self.covar_module.initialize_from_data(train_x, train_y)
+        self.lr = lr
 
     def forward(self,x):
         mean_x = self.mean_module(x)
@@ -15,7 +16,7 @@ class SpectralMixtureGPModel(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
     
     def training_step(self, mll, t, x, batch_idx=0):
@@ -30,6 +31,7 @@ def train_gp(model, train_ts, train_xs, num_training_iters):
     model.train()
     model.likelihood.train()
     optimizer = model.configure_optimizers()
+    print(train_ts.shape, train_xs.shape)
     for i in range(num_training_iters):
         optimizer.zero_grad()
         loss = model.training_step(mll=mll,t=train_ts, x=train_xs)

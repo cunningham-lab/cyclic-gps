@@ -10,20 +10,22 @@ from filterpy.kalman import KalmanFilter
 num_datapoints = 200
 RANK = 2
 OBS_DIM = 2
-TIME_STEP = 0.5
-ts = torch.arange(start=0, end=TIME_STEP * (num_datapoints), step=TIME_STEP).numpy()
-print(ts.shape)
+TIME_STEP = 1
+DTYPE = torch.double
+ts = torch.arange(start=0, end=TIME_STEP * (num_datapoints), step=TIME_STEP, dtype=DTYPE).numpy()
+print(ts[:10])
 fig, axs = plt.subplots(3, 3)
 for i in range(3):
     for j in range(3):
-        leg_model = LEGFamily(rank=RANK, obs_dim=OBS_DIM, train=False, prior_process_noise_level=0.5 * (i + 1), prior_length_scale=j*4)
+        leg_model = LEGFamily(rank=RANK, obs_dim=OBS_DIM, train=False, prior_process_noise_level=0.5 * (i + 1), prior_length_scale=j*4, data_type=DTYPE)
+        leg_model.double()
         kf = init_kalman_filter(leg_model, TIME_STEP, use_approximation=False)
         zs = generate_states_from_kalman(kf, ts)
         xs = zs @ kf.H.T + np.random.multivariate_normal(mean=np.zeros(shape=(2)), cov=leg_model.calc_Lambda_Lambda_T(leg_model.Lambda).numpy(), size=num_datapoints)
         kf = init_kalman_filter(leg_model, TIME_STEP, use_approximation=False) 
         kf_state_ests = get_state_estimates(kf, xs).squeeze(-1)
-        leg_state_ests, _ = leg_model.compute_insample_posterior(ts=torch.from_numpy(ts).float(), xs=torch.from_numpy(xs).float())
-
+        leg_state_ests, _ = leg_model.compute_insample_posterior(ts=torch.from_numpy(ts).double(), xs=torch.from_numpy(xs).double())
+        assert(torch.allclose(torch.from_numpy(kf_state_ests), leg_state_ests))
         axs[i,j].plot(ts, zs[:,0], label='generated z', c='green')
         axs[i,j].set_title("N: {}I, R: {}J".format(0.5 * (i + 1), j*4))
         #axs[i,j].axis('off')
