@@ -16,7 +16,10 @@ def test_log_marginal_likelihood():
                 ts, xs = generate_data(num_datapoints=n, data_dim=d, data_type=DTYPE, spacing = spacing)
                 leg_model = LEGFamily(rank=RANK, obs_dim=xs.shape[-1], train=False, data_type=DTYPE)
                 leg_model.double()
-                naive_ll = compute_log_marginal_likelihood(N = leg_model.N, R = leg_model.R, B = leg_model.B, Lambda=leg_model.calc_Lambda_Lambda_T(leg_model.Lambda), ts=ts, xs=xs)
+                naive_ll = compute_log_marginal_likelihood(
+                    N = leg_model.N, R = leg_model.R, B = leg_model.B, 
+                    Lambda=leg_model.calc_Lambda_Lambda_T(leg_model.Lambda), 
+                    ts=ts, xs=xs)
                 leg_ll = leg_model.log_likelihood(ts=ts, xs=xs)
                 if spacing == "regular":
                     kf = init_kalman_filter(leg_model=leg_model, use_approximation=False)
